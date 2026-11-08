@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-voice
+      name: '@kewen/dsh-voice'

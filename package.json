@@ -1,0 +1,77 @@
+{
+  "name": "@kewen/dsh-voice",
+  "version": "1.0.1",
+  "repository": { "type": "git", "url": "https://github.com/Hu9956/dsh-voice.git" },
+  "homepage": "https://github.com/Hu9956/dsh-voice#readme",
+  "bugs": { "url": "https://github.com/Hu9956/dsh-voice/issues" },
+  "description": "语音交互：按住说话、自动和手动朗读、语音通话；输入与朗读可分别启用。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "meta": {
+      "title": "语音交互",
+      "description": "按住输入框说话；自动或手动朗读回复，也可语音通话。输入和朗读可独立开关。按住说话需要启用官方语音输入；朗读需要百炼 API Key。"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "dsh-std": {
+    "apiVersion": "dsh-std/v1",
+    "domains": [
+      "presentation"
+    ],
+    "platforms": [
+      "web"
+    ],
+    "permissions": ["network", "settings", "microphone"],
+    "applies": "restart"
+  },
+  "scripts": {
+    "bundle": "node run.mjs bundle",
+    "typecheck": "node run.mjs typecheck",
+    "test": "node --test tests/speakify.test.ts tests/pacing.test.ts tests/retry.test.ts tests/host.test.js tests/settings.test.js tests/settings-client.test.ts tests/call.test.js tests/vad.test.ts tests/controller.test.ts tests/intent.test.ts tests/controller-v2.test.ts tests/controller-turn.test.ts tests/controller-compose.test.ts tests/draft.test.ts tests/meter.test.ts tests/glass.test.ts tests/noise-meter.test.ts tests/bridge.test.ts tests/voice-vad.test.js tests/asr.test.js tests/turn.test.js"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/call.js",
+    "lib/turn.js",
+    "lib/turn-worker.js",
+    "lib/turn-features.js",
+    "lib/vad-assets.js",
+    "lib/vad-core.js",
+    "lib/vad-worker.js",
+    "lib/asr.js",
+    "vendor/",
+    "lib/client.js",
+    "lib/client.js.map",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
+    "@types/react": "18.3.31",
+    "@types/react-dom": "18.3.7",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tsdown": "0.22.2",
+    "typescript": "5.6.3"
+  },
+  "license": "MIT"
+}
