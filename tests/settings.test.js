@@ -1,5 +1,5 @@
 /**
- * 朗读设置（GET/POST /voice-reply/settings）和试听时临时换音色（open 带 voice）。
+ * 朗读设置（GET/POST /voice-reply/settings）、双服务商（DeepSeek / 阿里百炼）Key 隔离与试听。
  * 设置的读写都在临时文件夹里做，不碰真正的 ~/.config/dsh-voice。
  */
 import { test } from 'node:test'
@@ -41,25 +41,50 @@ function post(url, body, type = 'application/json') {
 
 const FAKE_KEY = 'sk-test-not-a-real-key'
 
-test('没有 Key 时设置页照样能读：默认设置、可选值和说明', async () => {
-  const app = await serve({ configDir: tempDir() })
+test('全新安装没有 Key 时默认选 DeepSeek，已有百炼 Key 的老用户升级自动保持百炼', async () => {
+  // 1) 全新空目录：默认选 DeepSeek（stella）
+  const freshApp = await serve({ configDir: tempDir() })
   try {
-    const res = await fetch(`${app.base}/settings`)
+    const res = await fetch(`${freshApp.base}/settings`)
     assert.equal(res.status, 200)
     const data = await res.json()
     assert.equal(data.ready, false)
-    assert.match(data.error, /dashscope\.key/)
-    assert.deepEqual(data.settings, { model: 'qwen3-tts-flash-realtime', voice: 'Cherry', turnLimit: 800, callSilenceMs: 1200, callBargeIn: false, callSmartTurn: false, callKeepOnLock: false, speakWhole: false, callSensitivity: 'medium', callVoiceModel: true, callCloudAsr: false, speechRate: 1, holdEnabled: true, replyEnabled: true })
+    assert.match(data.error, /deepseek\.key/)
+    assert.deepEqual(data.settings, { model: 'deepseek-tts', voice: 'stella', turnLimit: 800, callSilenceMs: 1200, callBargeIn: false, callSmartTurn: false, callKeepOnLock: false, speakWhole: false, callSensitivity: 'medium', callVoiceModel: true, callCloudAsr: false, speechRate: 1, holdEnabled: true, replyEnabled: true })
     assert.equal(typeof data.vadVersion, 'string')
     assert.deepEqual(data.catalog.callSilences, [800, 1000, 1200, 1500, 2000, 3000])
-    assert.equal(data.catalog.models.length, 1)
-    const ids = data.catalog.models[0].voices.map((v) => v.id)
-    assert.equal(ids.length, 48)
-    assert.equal(new Set(ids).size, 48, '音色 id 不能重复')
-    assert.ok(ids.includes('Serena'))
+    assert.deepEqual(data.catalog.providers.map((p) => ({ id: p.id, ready: p.ready })), [
+      { id: 'deepseek', ready: false },
+      { id: 'dashscope', ready: false },
+    ])
+    assert.equal(data.catalog.models.length, 2)
+    const dsVoices = data.catalog.models[0].voices.map((v) => v.id)
+    assert.deepEqual(dsVoices, ['stella', 'tide'])
+    const bailianVoices = data.catalog.models[1].voices.map((v) => v.id)
+    assert.equal(bailianVoices.length, 48)
+    assert.equal(new Set(bailianVoices).size, 48, '音色 id 不能重复')
+    assert.ok(bailianVoices.includes('Serena'))
     assert.deepEqual(data.catalog.turnLimits, [300, 500, 800, 1500, 3000, 0])
   } finally {
-    await app.close()
+    await freshApp.close()
+  }
+
+  // 2) 老用户升级（磁盘已有 dashscope.key、没有 voice-reply.json）：自动保持百炼 qwen3-tts-flash-realtime
+  const legacyDir = tempDir()
+  writeFileSync(join(legacyDir, 'dashscope.key'), `${FAKE_KEY}\n`, { mode: 0o600 })
+  const legacyApp = await serve({ configDir: legacyDir })
+  try {
+    const data = await (await fetch(`${legacyApp.base}/settings`)).json()
+    assert.equal(data.ready, true)
+    assert.equal(data.error, null)
+    assert.equal(data.settings.model, 'qwen3-tts-flash-realtime')
+    assert.equal(data.settings.voice, 'Cherry')
+    assert.deepEqual(data.catalog.providers.map((p) => ({ id: p.id, ready: p.ready })), [
+      { id: 'deepseek', ready: false },
+      { id: 'dashscope', ready: true },
+    ])
+  } finally {
+    await legacyApp.close()
   }
 })
 
@@ -70,6 +95,7 @@ test('两个功能独立开关，保留旧设置并在重读时生效', async ()
   const app = await serve({ configDir: dir })
   try {
     let settings = (await (await fetch(`${app.base}/settings`)).json()).settings
+    assert.equal(settings.model, 'qwen3-tts-flash-realtime')
     assert.equal(settings.holdEnabled, true)
     assert.equal(settings.replyEnabled, true)
     let res = await post(`${app.base}/settings`, { holdEnabled: false })
@@ -94,9 +120,10 @@ test('两个功能独立开关，保留旧设置并在重读时生效', async ()
   }
 })
 
-test('设置接口不会把 Key 发给浏览器', async () => {
+test('设置接口不会把任何服务商的 Key 发给浏览器', async () => {
   const dir = tempDir()
   writeFileSync(join(dir, 'dashscope.key'), `${FAKE_KEY}\n`, { mode: 0o600 })
+  writeFileSync(join(dir, 'deepseek.key'), 'sk-deepseek-secret-key\n', { mode: 0o600 })
   const app = await serve({ configDir: dir })
   try {
     const res = await fetch(`${app.base}/settings`)
@@ -104,32 +131,59 @@ test('设置接口不会把 Key 发给浏览器', async () => {
     assert.equal(res.status, 200)
     assert.equal(JSON.parse(text).ready, true)
     assert.equal(text.includes(FAKE_KEY), false)
+    assert.equal(text.includes('sk-deepseek-secret-key'), false)
   } finally {
     await app.close()
   }
 })
 
-test('设置页保存和替换 Key，服务端即时使用且不回显', async () => {
+test('设置页按服务商分别保存与替换 Key，服务端即时使用且不回显', async () => {
   const dir = tempDir()
-  let usedKey
-  const app = await serve({ configDir: dir, cloudTranscribe: async ({ key }) => { usedKey = key; return '测试' } })
+  let usedCall
+  const app = await serve({ configDir: dir, cloudTranscribe: async (opts) => { usedCall = opts; return '测试' } })
   try {
-    for (const key of [FAKE_KEY, 'replacement-test-key']) {
+    // 默认是 DeepSeek：不带 provider 时写入 deepseek.key
+    for (const key of [FAKE_KEY, 'replacement-ds-key']) {
       const res = await post(`${app.base}/key`, { key: ` ${key} ` })
       const text = await res.text()
       assert.equal(res.status, 200)
       assert.equal(JSON.parse(text).ready, true)
       assert.equal(text.includes(key), false)
-      assert.equal(readFileSync(join(dir, 'dashscope.key'), 'utf8').trim(), key)
-      assert.equal(statSync(join(dir, 'dashscope.key')).mode & 0o777, 0o600)
+      assert.equal(readFileSync(join(dir, 'deepseek.key'), 'utf8').trim(), key)
+      assert.equal(statSync(join(dir, 'deepseek.key')).mode & 0o777, 0o600)
       assert.equal((await (await fetch(`${app.base}/settings`)).text()).includes(key), false)
       const asr = await post(`${app.base}/asr`, { audio: 'AAAA' })
       assert.equal(asr.status, 200)
-      assert.equal(usedKey, key)
+      assert.equal(usedCall.provider, 'deepseek')
+      assert.equal(usedCall.key, key)
     }
-    for (const key of ['', '   ', 'bad key', 'bad\nkey', 42, 'a'.repeat(1025)]) {
-      assert.equal((await post(`${app.base}/key`, { key })).status, 400)
-      assert.equal(readFileSync(join(dir, 'dashscope.key'), 'utf8').trim(), 'replacement-test-key')
+
+    // 指定 provider: 'dashscope' 保存百炼 Key，切换模型后互不覆盖
+    const bailianKey = 'sk-bailian-dedicated'
+    const saveBailian = await post(`${app.base}/key`, { key: bailianKey, provider: 'dashscope' })
+    const saveText = await saveBailian.text()
+    assert.equal(saveBailian.status, 200)
+    assert.equal(saveText.includes(bailianKey), false)
+    assert.equal(readFileSync(join(dir, 'dashscope.key'), 'utf8').trim(), bailianKey)
+    assert.equal(readFileSync(join(dir, 'deepseek.key'), 'utf8').trim(), 'replacement-ds-key')
+
+    await post(`${app.base}/settings`, { model: 'qwen3-tts-flash-realtime', voice: 'Serena' })
+    assert.equal((await post(`${app.base}/asr`, { audio: 'AAAA' })).status, 200)
+    assert.equal(usedCall.provider, 'dashscope')
+    assert.equal(usedCall.key, bailianKey)
+
+    for (const body of [
+      { key: '' },
+      { key: '   ' },
+      { key: 'bad key' },
+      { key: 'bad\nkey' },
+      { key: 42 },
+      { key: 'a'.repeat(1025) },
+      { key: FAKE_KEY, provider: 'unknown' },
+      { key: FAKE_KEY, provider: 123 },
+    ]) {
+      assert.equal((await post(`${app.base}/key`, body)).status, 400)
+      assert.equal(readFileSync(join(dir, 'deepseek.key'), 'utf8').trim(), 'replacement-ds-key')
     }
     assert.equal((await post(`${app.base}/key`, JSON.stringify({ key: FAKE_KEY }), 'text/plain')).status, 415)
     assert.equal((await fetch(`${app.base}/key`)).status, 405)
@@ -153,7 +207,7 @@ test('设置也要先通过登录校验', async () => {
 test('改设置：写进 voice-reply.json，保留手写的其它字段，文件只有本人能读写', async () => {
   const dir = tempDir()
   const file = join(dir, 'voice-reply.json')
-  writeFileSync(file, JSON.stringify({ host: 'dashscope.aliyuncs.com', note: '手写的' }))
+  writeFileSync(file, JSON.stringify({ host: 'dashscope.aliyuncs.com', deepseekHost: 'api.deepseek.com', note: '手写的' }))
   const app = await serve({ configDir: dir })
   try {
     const res = await post(`${app.base}/settings`, { voice: 'Serena', turnLimit: 1500, callSilenceMs: 2000, speakWhole: true, callSensitivity: 'low' })
@@ -171,6 +225,7 @@ test('改设置：写进 voice-reply.json，保留手写的其它字段，文件
     assert.equal(saved.speakWhole, true)
     assert.equal(saved.note, '手写的')
     assert.equal(saved.host, 'dashscope.aliyuncs.com')
+    assert.equal(saved.deepseekHost, 'api.deepseek.com')
     assert.equal(statSync(file).mode & 0o777, 0o600)
     const again = await (await fetch(`${app.base}/settings`)).json()
     assert.equal(again.settings.voice, 'Serena')
@@ -202,7 +257,7 @@ test('改设置只收 application/json（防跨站）', async () => {
   const dir = tempDir()
   const app = await serve({ configDir: dir })
   try {
-    const res = await post(`${app.base}/settings`, JSON.stringify({ voice: 'Serena' }), 'text/plain')
+    const res = await post(`${app.base}/settings`, JSON.stringify({ voice: 'stella' }), 'text/plain')
     assert.equal(res.status, 415)
     await res.text()
     assert.equal(existsSync(join(dir, 'voice-reply.json')), false)
@@ -211,7 +266,7 @@ test('改设置只收 application/json（防跨站）', async () => {
   }
 })
 
-test('试听时临时换音色：不认识的音色、模型直接拒绝，不连百炼', async () => {
+test('试听时临时换音色：不认识的音色、模型直接拒绝，不连云端', async () => {
   const dir = tempDir()
   writeFileSync(join(dir, 'dashscope.key'), `${FAKE_KEY}\n`, { mode: 0o600 })
   const app = await serve({ configDir: dir })
@@ -244,6 +299,91 @@ function parseFrames(bytes) {
   }
   return { pcmBytes, last, error }
 }
+
+test('DeepSeek WebSocket 流式合成：返回 clientRate、转发 text / finish_text、解包二进制 PCM 帧与审核错误', async () => {
+  const dir = tempDir()
+  writeFileSync(join(dir, 'deepseek.key'), 'ds-mock-key\n', { mode: 0o600 })
+  let lastConn
+  class FakeWs {
+    constructor(url, opts) {
+      this.url = url
+      this.opts = opts
+      this.readyState = 1 // WebSocket.OPEN
+      this.sent = []
+      this.listeners = new Map()
+      lastConn = this
+      queueMicrotask(() => this.emit('open', {}))
+    }
+
+    addEventListener(type, fn) {
+      const list = this.listeners.get(type) ?? []
+      list.push(fn)
+      this.listeners.set(type, list)
+    }
+
+    emit(type, ev) {
+      for (const fn of this.listeners.get(type) ?? []) fn(ev)
+    }
+
+    send(raw) {
+      const msg = JSON.parse(raw)
+      this.sent.push(msg)
+      if (msg.event === 'finish_text') {
+        const text = this.sent.filter((m) => m.event === 'text').map((m) => m.text).join('')
+        if (text.includes('违规')) {
+          queueMicrotask(() => this.emit('message', { data: JSON.stringify({ event: 'finish', code: 'content_filter', message: 'Content Exists Risk' }) }))
+        } else {
+          const pcm = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer
+          queueMicrotask(() => {
+            this.emit('message', { data: pcm })
+            this.emit('message', { data: JSON.stringify({ event: 'finish', code: 'success', message: '' }) })
+          })
+        }
+      }
+    }
+
+    close() {
+      this.readyState = 3
+    }
+  }
+
+  const app = await serve({ configDir: dir, createWebSocket: (url, opts) => new FakeWs(url, opts) })
+  try {
+    const id = 'ds-stream-ok-0001'
+    const opened = await post(`${app.base}/open`, { id, voice: 'tide', model: 'deepseek-tts', speechRate: 1.5 })
+    assert.equal(opened.status, 200)
+    const openedJson = await opened.json()
+    assert.equal(openedJson.clientRate, 1.5, 'DeepSeek 不支持服务端调速，由服务端告知客户端按 1.5× 拉伸')
+    assert.equal(lastConn.url, 'wss://api.deepseek.com/v1/tools/tts?voice_id=tide&format=pcm&filter_markdown=true')
+    assert.equal(lastConn.opts.headers.Authorization, 'Bearer ds-mock-key')
+
+    const audio = fetch(`${app.base}/audio?id=${id}`)
+    assert.equal((await post(`${app.base}/append`, { id, text: '你好，' })).status, 200)
+    assert.equal((await post(`${app.base}/append`, { id, text: 'DeepSeek。' })).status, 200)
+    assert.equal((await post(`${app.base}/finish`, { id })).status, 200)
+    const frames = parseFrames(new Uint8Array(await (await audio).arrayBuffer()))
+    assert.equal(frames.error, null)
+    assert.equal(frames.pcmBytes, 8)
+    assert.equal(frames.last, 3)
+    assert.deepEqual(lastConn.sent, [
+      { event: 'text', text: '你好，' },
+      { event: 'text', text: 'DeepSeek。' },
+      { event: 'finish_text' },
+    ])
+
+    // 触发安全风控时转成友好的错误帧
+    const badId = 'ds-stream-err-001'
+    await post(`${app.base}/open`, { id: badId })
+    const badAudio = fetch(`${app.base}/audio?id=${badId}`)
+    await post(`${app.base}/append`, { id: badId, text: '违规词' })
+    await post(`${app.base}/finish`, { id: badId })
+    const badFrames = parseFrames(new Uint8Array(await (await badAudio).arrayBuffer()))
+    assert.match(badFrames.error, /安全审核/)
+    assert.equal(badFrames.last, 3)
+  } finally {
+    await app.close()
+  }
+})
 
 const HAS_KEY = existsSync(join(CONFIG_DIR, 'dashscope.key'))
 

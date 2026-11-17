@@ -1,10 +1,10 @@
 /**
  * 通话胶囊照抄输入框卡片的玻璃：把卡片和它 ::before 的计算样式换成胶囊用的 CSS 变量。
  *
- * 输入框外观有好几套（官方原版实色；harness-plus 的单层 / 双层 / 待办栏；手机上 mobile-plus 再覆盖一层），
- * 磨砂有时画在卡片的 ::before 上（单层），有时画在外框上（双层，卡片本身是半透明渐变）。
- * 这里不写死哪一套，读实际画出来的样式。层次和卡片一样：
- *   磨砂层（卡片 ::before 的底色 + backdrop-filter）→ 卡片底色 / 渐变 → 内细边（inset 阴影、描边）。
+ * 输入框外观有好几套（官方原版实色；@kewen/dsh-ui 原版待办栏共享毛玻璃；harness-plus 的单层 / 双层；手机上 mobile-plus 覆盖），
+ * 磨砂有时画在卡片的 ::before 上（单层），有时直接画在卡片自身或外框上。
+ * 这里不写死哪一套，读实际画出来的样式（包含卡片本体与 ::before 两层的 boxShadow）。层次和卡片一样：
+ *   磨砂层（卡片 ::before 或自身的 backdrop-filter）→ 卡片底色 / 渐变 → 内细边（inset 阴影、描边）。
  * 外投影单独给出（胶囊 overflow: hidden，外投影要画在胶囊自己身上）。
  *
  * 纯函数，不 import 别的模块，Node 里能直接测。
@@ -18,6 +18,8 @@ export interface CardLook {
   borderWidth: string
   borderStyle: string
   borderColor: string
+  /** 卡片自身的 backdrop-filter（当 ::before 没画时兜底复用）。 */
+  backdropFilter?: string
   /** 左上角圆角（计算值，如 26px）。 */
   borderRadius?: string
   /** 圆角形状（round / superellipse(…)）；浏览器不支持时是空字符串。 */
@@ -30,6 +32,7 @@ export interface UnderLook {
   backgroundColor: string
   backgroundImage: string
   backdropFilter: string
+  boxShadow?: string
 }
 
 /** 「没有阴影」：要放进逗号分隔的阴影列表里，不能用 none。 */
@@ -71,8 +74,12 @@ export function glassVars(card: CardLook, under: UnderLook | undefined): Record<
   }
   for (const shadow of splitShadows(card.boxShadow)) (/\binset\b/.test(shadow) ? inset : outer).push(shadow)
   const drawn = under !== undefined && under.content !== 'none' && under.content !== 'normal'
+  if (drawn && under.boxShadow) {
+    for (const shadow of splitShadows(under.boxShadow)) (/\binset\b/.test(shadow) ? inset : outer).push(shadow)
+  }
+  const cardBlur = (card.backdropFilter ?? '').trim()
   const vars: Record<string, string> = {}
-  // 圆角跟卡片一样（单层 26、双层 17…）；读不到就不写，胶囊保持两头半圆
+  // 圆角跟卡片一样（单层 26、双层 17…）；读不到就不写，回退到宿主面板圆角
   const radius = (card.borderRadius ?? '').trim().split(/\s+/)[0] ?? ''
   if (/^\d+(\.\d+)?px$/.test(radius) && Number.parseFloat(radius) > 0) vars['--vr-glass-radius'] = radius
   const shape = (card.cornerShape ?? '').trim()
@@ -85,6 +92,8 @@ export function glassVars(card: CardLook, under: UnderLook | undefined): Record<
     '--vr-glass-outer': outer.length > 0 ? outer.join(', ') : NO_SHADOW,
     '--vr-glass-under': drawn ? under.backgroundColor.trim() || 'transparent' : 'transparent',
     '--vr-glass-under-image': drawn ? under.backgroundImage.trim() || 'none' : 'none',
-    '--vr-glass-blur': drawn ? under.backdropFilter.trim() || 'none' : 'none',
+    '--vr-glass-blur': drawn
+      ? under.backdropFilter.trim() || 'none'
+      : cardBlur !== '' && cardBlur !== 'none' ? cardBlur : 'none',
   }
 }

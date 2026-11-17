@@ -9,6 +9,7 @@
  */
 
 import { speechRate } from './settings'
+import { TimeStretcher } from './time-stretch'
 
 const BASE = '/voice-reply'
 const SAMPLE_RATE = 24000
@@ -34,23 +35,25 @@ export interface OpenOptions {
   speechRate?: number
 }
 
-async function post(path: string, body: unknown): Promise<void> {
+async function post(path: string, body: unknown): Promise<Record<string, unknown>> {
   const res = await fetch(`${BASE}/${path}`, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
+  let parsed: Record<string, unknown> = {}
+  try {
+    const raw = await res.json()
+    if (raw !== null && typeof raw === 'object' && !Array.isArray(raw)) parsed = raw as Record<string, unknown>
+  } catch {
+    // 不是 JSON 就用默认空对象或状态码
+  }
   if (!res.ok) {
-    let message = `HTTP ${res.status}`
-    try {
-      const data = await res.json() as { error?: unknown }
-      if (typeof data.error === 'string') message = data.error
-    } catch {
-      // 不是 JSON 就用状态码
-    }
+    const message = typeof parsed.error === 'string' ? parsed.error : `HTTP ${res.status}`
     throw new Error(message)
   }
+  return parsed
 }
 
 /** crypto.randomUUID 只在安全上下文里有（手机用局域网 http 访问时没有），退回 getRandomValues。 */
@@ -74,11 +77,17 @@ export class Utterance {
   private pendingText = ''
   private flushQueued = false
   private abort = new AbortController()
+  private stretcher = new TimeStretcher(1)
 
   constructor(readonly tag: string, private speaker: Speaker, options: OpenOptions = {}) {
     const rate = options.speechRate ?? speechRate()
     this.chain = post('open', { id: this.id, ...options, ...(rate === undefined ? {} : { speechRate: rate }) }).then(
-      () => { this.listen() },
+      (opened) => {
+        if (typeof opened.clientRate === 'number' && opened.clientRate > 0) {
+          this.stretcher = new TimeStretcher(opened.clientRate)
+        }
+        void this.listen()
+      },
       (error: unknown) => { this.fail(error) },
     )
   }
@@ -102,7 +111,7 @@ export class Utterance {
   finish(): void {
     if (this.cancelled || this.finished) return
     this.finished = true
-    this.step(() => post('finish', { id: this.id }))
+    this.step(async () => { await post('finish', { id: this.id }) })
   }
 
   cancel(): void {
@@ -112,7 +121,7 @@ export class Utterance {
     this.chunks = []
     this.abort.abort()
     // 排在 open 之后发，免得服务端还没建好就先收到 cancel
-    this.chain = this.chain.then(() => post('cancel', { id: this.id })).catch(() => {})
+    this.chain = this.chain.then(async () => { await post('cancel', { id: this.id }) }).catch(() => {})
   }
 
   private step(run: () => Promise<void>): void {
@@ -170,17 +179,26 @@ export class Utterance {
             }
             this.fail(new Error(message))
           } else if (type === FRAME_END) {
-            // 结束帧之后服务端就关流了
+            this.flushStretched()
           }
         }
         buffer = buffer.slice(offset)
       }
+      this.flushStretched()
     } catch (error) {
       if (!this.cancelled) this.fail(error)
     } finally {
       this.ended = true
       this.speaker.pump()
     }
+  }
+
+  private flushStretched(): void {
+    if (this.cancelled || this.failed) return
+    const tail = this.stretcher.flush()
+    if (tail.length === 0) return
+    this.chunks.push(tail)
+    this.speaker.pump()
   }
 
   /** 16 位小端 PCM 转成 Float32；帧之间可能把一个采样拆开，留着拼下一帧。 */
@@ -196,12 +214,14 @@ export class Utterance {
     }
     const whole = data.length - (data.length % 2)
     if (whole < data.length) this.leftover = data[data.length - 1] ?? null
-    const samples = new Float32Array(whole / 2)
+    const rawSamples = new Float32Array(whole / 2)
     const view = new DataView(data.buffer, data.byteOffset, whole)
-    for (let i = 0; i < samples.length; i++) samples[i] = view.getInt16(i * 2, true) / 32768
+    for (let i = 0; i < rawSamples.length; i++) rawSamples[i] = view.getInt16(i * 2, true) / 32768
+    if (rawSamples.length === 0) return
+    this.speaker.clearError()
+    const samples = this.stretcher.push(rawSamples)
     if (samples.length === 0) return
     this.chunks.push(samples)
-    this.speaker.clearError()
     this.speaker.pump()
   }
 }

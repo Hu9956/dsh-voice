@@ -1,3 +1,4 @@
+import { Button } from '@kewen/dsh-ui'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Phase } from './controller'
 import { sessionEntry, usePhase, type InputActions } from './store'
@@ -478,7 +479,7 @@ const COUNTDOWN_SECONDS = 10
 
 /** 卡片上方的状态条：准备中 / 声波 / 识别中 / 提示 / 待插入的结果。 */
 function Status({ phase, phone, sessionId }: { phase: Phase, phone: boolean, sessionId: string }) {
-  if (phase.kind === 'message') return <div className="vh-status" role="status">{phase.text}</div>
+  if (phase.kind === 'message') return <div className="vh-status" role="status"><span className="vh-msg-text">{phase.text}</span></div>
   if (phase.kind === 'requesting') return <div className="vh-status" role="status"><span className="vh-dot" />正在打开麦克风…</div>
   if (phase.kind === 'transcribing') return <div className="vh-status" role="status"><span className="vh-dot" />正在识别…</div>
   if (phase.kind === 'pending') return <PendingResult text={phase.text} sessionId={sessionId} />
@@ -495,7 +496,7 @@ function Recording({ phase, phone }: { phase: Extract<Phase, { kind: 'recording'
   return (
     <div className="vh-status vh-recording" data-armed={phase.cancelArmed || undefined} data-ending={ending || undefined} role="status">
       <span className="vh-rec" />
-      <Waveform recording={phase.recording} />
+      <Waveform recording={phase.recording} armed={phase.cancelArmed} />
       <span className="vh-hint">{hint}</span>
     </div>
   )
@@ -519,40 +520,98 @@ function PendingResult({ text, sessionId }: { text: string, sessionId: string })
   return (
     <div className="vh-status vh-pending" role="status">
       <span className="vh-pending-text" title={text}>{text}</span>
-      <button type="button" className="vh-action" onMouseDown={e => e.preventDefault()} onClick={() => controller.insertPending()}>插入</button>
-      <button type="button" className="vh-action vh-quiet" aria-label="丢弃识别结果" onMouseDown={e => e.preventDefault()} onClick={() => controller.discardPending()}>丢弃</button>
+      <Button
+        variant="primary"
+        size="sm"
+        className="vh-action"
+        onMouseDown={e => e.preventDefault()}
+        onClick={() => controller.insertPending()}
+      >
+        插入
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="vh-action vh-quiet"
+        aria-label="丢弃识别结果"
+        onMouseDown={e => e.preventDefault()}
+        onClick={() => controller.discardPending()}
+      >
+        丢弃
+      </Button>
     </div>
   )
 }
 
-function Waveform({ recording }: { recording: { amplitude(): number } }) {
-  const svg = useRef<SVGSVGElement>(null)
+function Waveform({ recording, armed }: { recording: { amplitude(): number }, armed: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const colorRef = useRef('')
+  const drawRef = useRef<(() => void) | null>(null)
+
   useEffect(() => {
-    const lines = Array.from(svg.current?.querySelectorAll('line') ?? []).reverse()
-    const levels = lines.map(() => 0)
-    let frame = 0
-    let last = -Infinity
-    const draw = (now: number) => {
-      if (now - last >= 50) {
-        last = now
-        levels.unshift(recording.amplitude())
-        levels.length = lines.length
-        lines.forEach((line, i) => {
-          const h = 1 + Math.min(1, (levels[i] ?? 0) * 5) * 8
-          line.setAttribute('y1', String(10 - h))
-          line.setAttribute('y2', String(10 + h))
-        })
+    const canvas = canvasRef.current
+    if (canvas === null) return
+    colorRef.current = getComputedStyle(canvas).color
+    drawRef.current?.()
+  }, [armed])
+
+  useEffect(() => {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext('2d') ?? null
+    if (canvas === null || ctx === null) return
+
+    colorRef.current = getComputedStyle(canvas).color
+    const reduce = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+
+    const width = 72
+    const height = 20
+    const barW = 2
+    const maxH = 18
+    const bars = 20
+    const stepX = (width - barW) / (bars - 1)
+    const dpr = Math.min(2, window.devicePixelRatio || 1)
+    canvas.width = Math.round(width * dpr)
+    canvas.height = Math.round(height * dpr)
+
+    const levels = new Array<number>(bars).fill(0)
+    const draw = () => {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      ctx.clearRect(0, 0, width, height)
+      ctx.fillStyle = colorRef.current || '#3b82f6'
+      for (let i = 0; i < bars; i++) {
+        const amp = levels[bars - 1 - i] ?? 0
+        const bh = maxH * (0.12 + Math.min(1, amp * 5) * 0.88)
+        const x = i * stepX
+        const y = (height - bh) / 2
+        if (typeof ctx.roundRect === 'function') {
+          ctx.beginPath()
+          ctx.roundRect(x, y, barW, bh, 1)
+          ctx.fill()
+        } else {
+          ctx.fillRect(x, y, barW, bh)
+        }
       }
-      frame = requestAnimationFrame(draw)
     }
-    frame = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(frame)
+    drawRef.current = draw
+
+    if (reduce) {
+      draw()
+      return () => { drawRef.current = null }
+    }
+
+    const tick = () => {
+      levels.unshift(recording.amplitude())
+      levels.length = bars
+      draw()
+    }
+    tick()
+    const timer = setInterval(tick, 50)
+    return () => {
+      drawRef.current = null
+      clearInterval(timer)
+    }
   }, [recording])
-  return (
-    <svg ref={svg} className="vh-wave" viewBox="0 0 120 20" preserveAspectRatio="none" aria-hidden>
-      {Array.from({ length: 20 }, (_, i) => (
-        <line key={i} x1={i * 6 + 3} x2={i * 6 + 3} y1="9" y2="11" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
-      ))}
-    </svg>
-  )
+
+  return <canvas ref={canvasRef} className="vh-wave" width={144} height={40} aria-hidden="true" />
 }

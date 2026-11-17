@@ -1,6 +1,8 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { injectPluginStyles, mountDshUiStyles } from '@kewen/dsh-ui'
 import { CallButton } from './CallButton'
-import { CallPanel } from './CallPanel'
+import { CallPanel, Panel as CallPanelInner } from './CallPanel'
+import { startCallPanelDrag } from './call-glass'
 import { callCss } from './call-styles'
 import { hangupCall, setSessions, setSpeech, setStatus, type SessionsApi, type SpeechRemote, type StatusStore } from './call/session'
 import { SettingsSection } from './SettingsSection'
@@ -12,6 +14,7 @@ import { VOICE_EVENT, publishVoiceApi } from './bridge'
 import { css } from './styles'
 import { VoiceToggle } from './VoiceToggle'
 import { applyHold } from '../hold'
+import { HoldOverlay } from '../hold/HoldOverlay'
 import { getSettingsState, loadSettings, subscribeSettings } from './settings'
 import { withReplyEnabled } from './reply-gate'
 
@@ -20,7 +23,7 @@ type SlotsApi = {
   register(entry: { name: string, id?: string, order?: number }, component: unknown): () => void
 }
 
-const STYLE_ID = '@kewen/dsh-voice-reply'
+export const STYLE_ID = '@kewen/dsh-voice-reply'
 const TOGGLE_SLOT = 'conversation.input.left'
 const ACTIONS_SLOT = 'conversation.chat.assistant-actions'
 /** 「插件」页里每个插件的详情页都会渲染这个 slot，组件里只认本插件。 */
@@ -32,7 +35,22 @@ const CALL_PANEL_SLOT = 'conversation.input.overlay'
 /** dsh-voice-hold 开始录音时在 window 上发的事件：一开口就停止朗读。 */
 export const RECORDING_EVENT = 'dsh-voice-hold:recording'
 
+export { CallPanel, CallPanelInner, HoldOverlay, SettingsSection, loadSettings, startCallPanelDrag }
+
 export const inject = ['slots']
+
+/** 挂载 @kewen/dsh-ui 共享原语样式与本插件局部样式，返回幂等卸载函数。 */
+export function injectStyles(): () => void {
+  const disposeUi = mountDshUiStyles()
+  const disposePlugin = injectPluginStyles(STYLE_ID, css + settingsCss + callCss)
+  let disposed = false
+  return () => {
+    if (disposed) return
+    disposed = true
+    disposePlugin()
+    disposeUi()
+  }
+}
 
 /**
  * 语音回复：输入框左侧加「语音模式」开关，打开后主代理边写边念；每条回复下方加喇叭按钮；
@@ -54,13 +72,7 @@ export function apply(ctx: Context): void {
     })
     return unsubscribe
   }, 'voice: load feature settings')
-  ctx.effect(() => {
-    const style = document.createElement('style')
-    style.dataset.pluginCss = STYLE_ID
-    style.textContent = css + settingsCss + callCss
-    document.head.appendChild(style)
-    return () => style.remove()
-  }, 'voice-reply: styles')
+  ctx.effect(() => injectStyles(), 'voice-reply: styles')
 
   // 手机浏览器要点按之后才能出声：语音模式开着时，页面上每次点按都顺手解锁
   ctx.effect(() => speaker.installUnlock(isEnabled), 'voice-reply: audio unlock')

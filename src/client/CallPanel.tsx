@@ -1,9 +1,10 @@
+import { Button } from '@kewen/dsh-ui'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { APPENDED_NOTICE, type CallPhase, type CallView } from './call/controller'
 import { currentCall, useCall, type InputActions } from './call/session'
 import { selectProgress } from './call/intent'
-import { mirrorGlass } from './call-glass'
+import { mirrorGlass, startCallPanelDrag } from './call-glass'
 import { useCallVisual } from './call-visual'
 import { selectTurn } from './follow'
 import { MicIcon, PhoneIcon } from './icons'
@@ -64,7 +65,7 @@ const COMPOSING_HINT: Partial<Record<CallPhase, string>> = {
 }
 
 /**
- * 通话胶囊：通话中出现在输入框正上方，输入框照常露着、能打字。
+ * 通话胶囊：通话中出现在输入框正上方（支持自由拖拽悬浮），输入框照常露着、能打字。
  * 胶囊插在输入框卡片（data-composer-card）前面、跟它同一层，输入区整体变高，不会盖住对话。
  * 它只是视图：通话本身在 call/session 里，审批、提问把输入栏换掉时胶囊卸载，电话照常进行。
  * 挂着的时候顺手把对话内容（给跟读）和输入框状态（给自动发送、接草稿）喂给通话。
@@ -138,14 +139,22 @@ export function CallPanel({ sessionId, useChat, useInput, useSession, inputActio
   )
 }
 
-function Panel({ view, composing }: { view: CallView, composing: boolean }) {
+export function Panel({ view, composing }: { view: CallView, composing: boolean }) {
   const call = () => currentCall()
+  const panelRef = useRef<HTMLDivElement>(null)
   const { canvasRef, avatarRef, tone } = useCallVisual(view.phase)
   const heardShown = view.heard !== '' && (view.phase === 'thinking' || view.phase === 'working' || view.phase === 'transcribing')
   const hint = (composing ? COMPOSING_HINT[view.phase] : undefined) ?? HINT[view.phase]
   const sub = view.notice !== '' ? view.notice : heardShown ? `你说：${view.heard}` : hint
+
+  useEffect(() => {
+    const panel = panelRef.current
+    if (panel === null) return
+    return startCallPanelDrag(panel)
+  }, [])
+
   return (
-    <div className="vr-call-panel" data-phase={view.phase} data-tone={tone} role="region" aria-label="语音通话">
+    <div ref={panelRef} className="vr-call-panel" data-phase={view.phase} data-tone={tone} role="region" aria-label="语音通话">
       <canvas ref={canvasRef} className="vr-call-wave" aria-hidden="true" />
       <button
         type="button"
@@ -162,35 +171,36 @@ function Panel({ view, composing }: { view: CallView, composing: boolean }) {
         </span>
       </button>
       <div className="vr-call-actions">
-        <button
-          type="button"
+        <Button
+          variant="toolbar"
+          size="md"
           className="vr-call-btn vr-call-done"
           hidden={view.phase !== 'hearing'}
           onClick={() => call()?.done()}
         >
           说完了
-        </button>
+        </Button>
         <RateButton />
-        <button
-          type="button"
+        <Button
+          variant="toolbar"
+          size="md"
           className="vr-call-btn vr-call-icon"
           data-on={view.muted ? '' : undefined}
           aria-label={view.muted ? '取消静音' : '静音'}
           aria-pressed={view.muted}
           title={view.muted ? '取消静音' : '静音'}
+          icon={<MicIcon muted={view.muted} />}
           onClick={() => call()?.toggleMute()}
-        >
-          <MicIcon muted={view.muted} />
-        </button>
-        <button
-          type="button"
+        />
+        <Button
+          variant="danger-solid"
+          size="md"
           className="vr-call-btn vr-call-icon vr-call-hangup"
           aria-label="挂断"
           title="挂断"
+          icon={<PhoneIcon hangup />}
           onClick={() => call()?.hangup()}
-        >
-          <PhoneIcon hangup />
-        </button>
+        />
       </div>
     </div>
   )
@@ -209,8 +219,9 @@ function RateButton() {
   const next = rates[(index + 1) % rates.length] ?? rates[0]!
   const label = `语速 ${formatRate(current)}，点一下换成 ${formatRate(next)}（下一句起生效）`
   return (
-    <button
-      type="button"
+    <Button
+      variant="toolbar"
+      size="md"
       className="vr-call-btn vr-call-rate"
       data-on={current !== 1 ? '' : undefined}
       aria-label={label}
@@ -218,6 +229,6 @@ function RateButton() {
       onClick={() => { changeSpeechRate(next).catch((error: unknown) => console.warn('[voice-reply] 换语速失败', error)) }}
     >
       {formatRate(current)}
-    </button>
+    </Button>
   )
 }

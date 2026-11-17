@@ -1,7 +1,9 @@
+import { Badge as DshBadge, Banner, Button, Meter } from '@kewen/dsh-ui'
 import { useEffect, useRef, useState } from 'react'
 import { Mic, MicError } from './call/mic'
 import { Vad, rmsDb, type Sensitivity } from './call/vad'
 import { LevelHistory, SENSITIVITY_LABELS, adviceFor } from './call/noise-meter'
+import { useCardDisabled } from './SettingsParts'
 
 /** 测多久自动停。 */
 const AUTO_STOP_MS = 60_000
@@ -36,7 +38,7 @@ function asLevel(value: string): Sensitivity {
   return value in SENSITIVITY_LABELS ? value as Sensitivity : 'medium'
 }
 
-function barPercent(db: number): number {
+export function barPercent(db: number): number {
   return Math.round(Math.min(1, Math.max(0, (db - BAR_MIN_DB) / (BAR_MAX_DB - BAR_MIN_DB))) * 100)
 }
 
@@ -45,18 +47,19 @@ function barPercent(db: number): number {
  * 以及断句认为你在说还是安静了。按选的档位和停顿时长判断，和通话里一致。
  */
 export function NoiseMeter({ sensitivity, silenceMs }: { sensitivity: string, silenceMs: number }) {
+  const cardDisabled = useCardDisabled()
   const run = useRef<Run | null>(null)
   const [reading, setReading] = useState<Reading | null>(null)
   const [error, setError] = useState<string | null>(null)
   const level = asLevel(sensitivity)
 
-  const stop = () => {
+  const stop = (clearReading = true) => {
     const r = run.current
     if (r === null) return
     run.current = null
     clearInterval(r.timer)
     r.mic.close()
-    setReading(null)
+    if (clearReading) setReading(null)
   }
 
   // 测着的时候改档位、改停顿：马上按新的判断
@@ -65,9 +68,14 @@ export function NoiseMeter({ sensitivity, silenceMs }: { sensitivity: string, si
     run.current?.vad.setSilenceMs(silenceMs)
   }, [level, silenceMs])
 
-  useEffect(() => stop, [])
+  useEffect(() => {
+    if (cardDisabled) stop()
+  }, [cardDisabled])
+
+  useEffect(() => () => stop(false), [])
 
   const start = () => {
+    if (run.current !== null) stop(false)
     setError(null)
     // AudioContext 必须在点按里同步建好（手机上不然一直 suspended）
     const mic = Mic.create()
@@ -130,24 +138,35 @@ export function NoiseMeter({ sensitivity, silenceMs }: { sensitivity: string, si
   return (
     <div className="vr-meter">
       <div className="vr-settings-control">
-        <button type="button" className="vr-settings-button" onClick={reading === null ? start : stop}>
+        <Button
+          variant={reading === null ? 'toolbar' : 'outline'}
+          size="sm"
+          disabled={cardDisabled}
+          onClick={reading === null ? start : () => stop()}
+        >
           {reading === null ? '测一下环境噪声' : '停止'}
-        </button>
+        </Button>
         {reading !== null
-          ? <span className="vr-settings-value" data-speaking={reading.speaking ? '' : undefined}>{reading.speaking ? '当成你在说话' : '安静'}</span>
+          ? (
+              <DshBadge variant={reading.speaking ? 'info' : 'subtle'}>
+                {reading.speaking ? '当成你在说话' : '安静'}
+              </DshBadge>
+            )
           : null}
       </div>
       {reading !== null
         ? (
             <>
-              <div className="vr-meter-bar" aria-hidden="true">
-                <div className="vr-meter-fill" data-speaking={reading.speaking ? '' : undefined} style={{ width: `${barPercent(reading.levelDb)}%` }} />
-                {reading.floorDb !== null ? <div className="vr-meter-mark" data-kind="floor" style={{ left: `${barPercent(reading.floorDb)}%` }} /> : null}
-                {threshold !== null ? <div className="vr-meter-mark" data-kind="threshold" style={{ left: `${barPercent(threshold)}%` }} /> : null}
-              </div>
-              <p className="vr-settings-note">
-                {`音量 ${Math.round(reading.levelDb)} dB · 底噪 ${reading.floorDb === null ? '—' : Math.round(reading.floorDb)} dB · 「${SENSITIVITY_LABELS[level]}」档门限 ${threshold === null ? '—' : Math.round(threshold)} dB`}
-              </p>
+              <Meter
+                variant="level"
+                className="vr-meter-level"
+                value={barPercent(reading.levelDb)}
+                threshold={threshold !== null ? barPercent(threshold) : undefined}
+                tone={reading.speaking ? 'warn' : 'ok'}
+                label={`底噪 ${reading.floorDb === null ? '—' : `${Math.round(reading.floorDb)} dB`} · 「${SENSITIVITY_LABELS[level]}」档门限 ${threshold === null ? '—' : `${Math.round(threshold)} dB`}`}
+                valueText={`${Math.round(reading.levelDb)} dB`}
+                aria-label="实时环境音量"
+              />
               <p className="vr-settings-note vr-settings-ok">
                 {ready ? adviceFor(reading.floorDb!, level) : '先别出声，等 3 秒…'}
               </p>
@@ -155,7 +174,7 @@ export function NoiseMeter({ sensitivity, silenceMs }: { sensitivity: string, si
             </>
           )
         : null}
-      {error !== null ? <p className="vr-settings-note vr-settings-error">{error}</p> : null}
+      {error !== null ? <Banner tone="error" className="vr-inline-banner">{error}</Banner> : null}
     </div>
   )
 }

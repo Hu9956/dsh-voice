@@ -1,12 +1,23 @@
 /**
- * 胶囊跟着输入框卡片的玻璃走：读卡片（和它 ::before）的计算样式，写成 CSS 变量挂在胶囊的位置（.vr-call-seat）上。
- * 换外观（插件页切单层 / 双层 / 原版、玻璃款式、调透明度）、换深浅色、手机横竖屏时重新读。
- * 换算规则见 call/glass.ts。
+ * 通话胶囊玻璃同步与自由悬浮拖拽：
+ * - 优先跟随输入框卡片（及其 ::before）的实际渲染外观，兜底对齐 @kewen/dsh-ui 统一原版待办栏共享毛玻璃（composerGlass / capsuleGlass）；
+ * - 支持将通话胶囊拖拽悬浮至视口任意位置，拖拽跨越 6px 阈值时调用 beginGlobalDrag() 全局锁，防止宿主 iframe 吞掉指针事件。
  */
-import { glassVars } from './call/glass'
+import { beginGlobalDrag, capsuleGlass, composerGlass } from '@kewen/dsh-ui'
+import { glassVars } from './call/glass.ts'
 
 /** 外观变了以后，等过渡动画走完再读一次。 */
 const SETTLE_MS = 450
+/** 指针移动超过该阈值才进入悬浮拖拽，保留短按点击「打断 / 暂停」手势。 */
+const DRAG_SLOP_PX = 6
+/** 拖拽悬浮时距离视口四边的最小安全留白。 */
+const VIEWPORT_MARGIN_PX = 8
+
+/** @kewen/dsh-ui 统一原版待办栏共享毛玻璃令牌引用。 */
+export const SHARED_CALL_GLASS = {
+  composer: composerGlass,
+  capsule: capsuleGlass,
+} as const
 
 function backdrop(style: CSSStyleDeclaration): string {
   return style.getPropertyValue('backdrop-filter') || style.getPropertyValue('-webkit-backdrop-filter')
@@ -31,6 +42,7 @@ export function mirrorGlass(card: HTMLElement, host: HTMLElement): () => void {
         borderWidth: look.borderTopWidth,
         borderStyle: look.borderTopStyle,
         borderColor: look.borderTopColor,
+        backdropFilter: backdrop(look),
         borderRadius: Number.parseFloat(look.borderTopLeftRadius) > 0 ? look.borderTopLeftRadius : look.borderBottomLeftRadius,
         cornerShape: look.getPropertyValue('corner-shape'),
       },
@@ -39,6 +51,7 @@ export function mirrorGlass(card: HTMLElement, host: HTMLElement): () => void {
         backgroundColor: under.backgroundColor,
         backgroundImage: under.backgroundImage,
         backdropFilter: backdrop(under),
+        boxShadow: under.boxShadow,
       },
     )
     // 上次写了、这次没有的（比如圆角读不到了）先拿掉，免得留着旧值
@@ -73,5 +86,155 @@ export function mirrorGlass(card: HTMLElement, host: HTMLElement): () => void {
     cancelAnimationFrame(frame)
     clearTimeout(timer)
     for (const name of written) host.style.removeProperty(name)
+  }
+}
+
+/**
+ * 为通话悬浮胶囊挂载自由拖拽手势，拖拽期间激活 beginGlobalDrag() 屏蔽 iframe 指针吞噬。
+ * 双击面板（非右侧操作按钮区）可复位回输入框正上方。
+ */
+export function startCallPanelDrag(panel: HTMLElement): () => void {
+  const doc = panel.ownerDocument
+  const win = doc.defaultView
+  if (!win) return () => {}
+
+  let offsetX = 0
+  let offsetY = 0
+  let activePointerId: number | null = null
+  let startX = 0
+  let startY = 0
+  let originX = 0
+  let originY = 0
+  let baseLeft = 0
+  let baseTop = 0
+  let panelWidth = 0
+  let panelHeight = 0
+  let dragging = false
+  let suppressNextClick = false
+  let endGlobalDrag: (() => void) | undefined
+
+  const writeOffset = (x: number, y: number) => {
+    offsetX = x
+    offsetY = y
+    if (x === 0 && y === 0) {
+      panel.style.removeProperty('--vr-drag-x')
+      panel.style.removeProperty('--vr-drag-y')
+      if (!dragging) delete panel.dataset.floating
+    } else {
+      panel.style.setProperty('--vr-drag-x', `${Math.round(x)}px`)
+      panel.style.setProperty('--vr-drag-y', `${Math.round(y)}px`)
+      panel.dataset.floating = ''
+    }
+  }
+
+  const clampDelta = (rawX: number, rawY: number): [number, number] => {
+    const vw = win.innerWidth || 0
+    const vh = win.innerHeight || 0
+    if (vw <= 0 || vh <= 0 || panelWidth <= 0 || panelHeight <= 0) return [rawX, rawY]
+    const minX = VIEWPORT_MARGIN_PX - baseLeft
+    const maxX = Math.max(minX, vw - VIEWPORT_MARGIN_PX - (baseLeft + panelWidth))
+    const minY = VIEWPORT_MARGIN_PX - baseTop
+    const maxY = Math.max(minY, vh - VIEWPORT_MARGIN_PX - (baseTop + panelHeight))
+    return [
+      Math.min(maxX, Math.max(minX, rawX)),
+      Math.min(maxY, Math.max(minY, rawY)),
+    ]
+  }
+
+  const stopSession = () => {
+    activePointerId = null
+    dragging = false
+    delete panel.dataset.dragging
+    if (offsetX === 0 && offsetY === 0) delete panel.dataset.floating
+    endGlobalDrag?.()
+    endGlobalDrag = undefined
+    win.removeEventListener('pointermove', onMove, true)
+    win.removeEventListener('pointerup', onUp, true)
+    win.removeEventListener('pointercancel', onCancel, true)
+    win.removeEventListener('blur', onCancel)
+  }
+
+  const onMove = (event: PointerEvent) => {
+    if (activePointerId === null || event.pointerId !== activePointerId) return
+    const dx = event.clientX - startX
+    const dy = event.clientY - startY
+    if (!dragging) {
+      if (Math.hypot(dx, dy) <= DRAG_SLOP_PX) return
+      dragging = true
+      panel.dataset.dragging = ''
+      panel.dataset.floating = ''
+      endGlobalDrag = beginGlobalDrag(doc)
+    }
+    event.preventDefault()
+    const [nextX, nextY] = clampDelta(originX + dx, originY + dy)
+    writeOffset(nextX, nextY)
+  }
+
+  const onUp = (event: PointerEvent) => {
+    if (activePointerId === null || event.pointerId !== activePointerId) return
+    const wasDragging = dragging
+    stopSession()
+    if (wasDragging) {
+      suppressNextClick = true
+      setTimeout(() => { suppressNextClick = false }, 0)
+    }
+  }
+
+  const onCancel = () => {
+    if (activePointerId === null) return
+    stopSession()
+  }
+
+  const onDown = (event: PointerEvent) => {
+    if (event.button !== 0 || activePointerId !== null) return
+    const target = event.target instanceof Element ? event.target : null
+    if (target?.closest('.vr-call-actions, [data-no-drag]')) return
+
+    const rect = panel.getBoundingClientRect()
+    activePointerId = event.pointerId
+    startX = event.clientX
+    startY = event.clientY
+    originX = offsetX
+    originY = offsetY
+    baseLeft = rect.left - offsetX
+    baseTop = rect.top - offsetY
+    panelWidth = rect.width
+    panelHeight = rect.height
+    dragging = false
+    suppressNextClick = false
+
+    win.addEventListener('pointermove', onMove, true)
+    win.addEventListener('pointerup', onUp, true)
+    win.addEventListener('pointercancel', onCancel, true)
+    win.addEventListener('blur', onCancel)
+  }
+
+  const onClickCapture = (event: MouseEvent) => {
+    if (!suppressNextClick) return
+    suppressNextClick = false
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  const onDoubleClick = (event: MouseEvent) => {
+    const target = event.target instanceof Element ? event.target : null
+    if (target?.closest('.vr-call-actions, [data-no-drag]')) return
+    if (offsetX === 0 && offsetY === 0) return
+    writeOffset(0, 0)
+  }
+
+  panel.addEventListener('pointerdown', onDown)
+  panel.addEventListener('click', onClickCapture, true)
+  panel.addEventListener('dblclick', onDoubleClick)
+
+  return () => {
+    stopSession()
+    panel.removeEventListener('pointerdown', onDown)
+    panel.removeEventListener('click', onClickCapture, true)
+    panel.removeEventListener('dblclick', onDoubleClick)
+    panel.style.removeProperty('--vr-drag-x')
+    panel.style.removeProperty('--vr-drag-y')
+    delete panel.dataset.floating
+    delete panel.dataset.dragging
   }
 }

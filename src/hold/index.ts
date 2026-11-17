@@ -1,4 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { injectPluginStyles, mountDshUiStyles } from '@kewen/dsh-ui'
 import { getSettingsState, loadSettings, subscribeSettings } from '../client/settings'
 import { HoldOverlay } from './HoldOverlay'
 import type { SpeechRemote } from './controller'
@@ -10,8 +11,20 @@ type SlotsApi = {
   register(entry: { name: string, id?: string, order?: number }, component: unknown): () => void
 }
 
-const STYLE_ID = '@kewen/dsh-voice-hold'
+export const HOLD_STYLE_ID = '@kewen/dsh-voice-hold'
 const OVERLAY_SLOT = 'conversation.input.overlay'
+
+function mountHoldStyles(): () => void {
+  const disposeUi = mountDshUiStyles()
+  const disposeHold = injectPluginStyles(HOLD_STYLE_ID, css)
+  let disposed = false
+  return () => {
+    if (disposed) return
+    disposed = true
+    disposeHold()
+    disposeUi()
+  }
+}
 
 /**
  * 按住说话复用官方「语音输入」提供的 speech Remote。
@@ -22,7 +35,7 @@ export function applyHold(ctx: Context): void {
   let enabled = getSettingsState().view?.settings.holdEnabled !== false
   let slotAvailable = false
   let unregister: (() => void) | undefined
-  let style: HTMLStyleElement | undefined
+  let disposeStyle: (() => void) | undefined
   let disposed = false
 
   const syncOverlay = () => {
@@ -38,14 +51,11 @@ export function applyHold(ctx: Context): void {
     const update = () => {
       if (disposed) return
       enabled = getSettingsState().view?.settings.holdEnabled !== false
-      if (enabled && style === undefined) {
-        style = document.createElement('style')
-        style.dataset.pluginCss = STYLE_ID
-        style.textContent = css
-        document.head.appendChild(style)
-      } else if (!enabled && style !== undefined) {
-        style.remove()
-        style = undefined
+      if (enabled && disposeStyle === undefined) {
+        disposeStyle = mountHoldStyles()
+      } else if (!enabled && disposeStyle !== undefined) {
+        disposeStyle()
+        disposeStyle = undefined
       }
       syncOverlay()
       if (!enabled) disposeAll()
@@ -57,8 +67,8 @@ export function applyHold(ctx: Context): void {
       disposed = true
       unsubscribe()
       syncOverlay()
-      style?.remove()
-      style = undefined
+      disposeStyle?.()
+      disposeStyle = undefined
       disposeAll()
     }
   }, 'voice-hold: settings and lifecycle')

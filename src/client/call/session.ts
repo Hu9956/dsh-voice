@@ -344,12 +344,12 @@ class ActiveCall {
     }
   }
 
-  /** 识别一句话：设置里开了「百炼识别」就先用百炼，出错再退回本机；没开就用本机（官方语音输入）。 */
+  /** 识别一句话：设置里开了「云端识别」就先走当前服务商的云端识别，出错再退回本机；没开就用本机（官方语音输入）。 */
   private async transcribe(samples: Float32Array, sampleRate: number): Promise<TranscribeResult> {
     if (!callCloudAsr()) return this.transcribeLocal(samples, sampleRate)
     const cloud = await cloudTranscribe(samples, sampleRate)
     if (cloud.ok) return cloud
-    console.warn('[voice-reply] 百炼识别失败，改用本机识别：', cloud.error)
+    console.warn('[voice-reply] 云端识别失败，改用本机识别：', cloud.error)
     const local = await this.transcribeLocal(samples, sampleRate)
     return local.ok ? local : cloud
   }

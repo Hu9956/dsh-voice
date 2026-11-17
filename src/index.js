@@ -1,9 +1,9 @@
 /**
- * @kewen/dsh-voice-reply Host 入口：替浏览器连阿里云百炼的实时语音合成（qwen3-tts-flash-realtime）。
+ * @kewen/dsh-voice Host 入口：替浏览器连接云端语音合成与可选云端识别（支持 DeepSeek 与阿里云百炼）。
  *
- * Key 在设置页提交后存到服务端（~/.config/dsh-voice/dashscope.key），不会回传给浏览器。
+ * Key 在设置页提交后分别存到服务端（~/.config/dsh-voice/deepseek.key 与 dashscope.key），不会回传给浏览器。
  * 一次「朗读」对应一个 utterance，生命周期：
- *   POST /voice-reply/open    { id }          服务端连上百炼并配好音色；可带 voice / model，试听时临时换
+ *   POST /voice-reply/open    { id }          服务端连上所选服务商并配好音色；可带 voice / model，试听时临时换
  *   GET  /voice-reply/audio?id=               分帧推回音频，直到这段念完
  *   POST /voice-reply/append  { id, text }    追加要念的文字（可多次）
  *   POST /voice-reply/finish  { id }          没有更多文字了，念完剩下的就结束
@@ -26,12 +26,11 @@ export const name = 'dsh-voice'
 export const BASE_PATH = '/voice-reply'
 /** Key 和设置都放这里（不在 DSH 的 profile 里，重装 DSH 不会丢）。 */
 export const CONFIG_DIR = join(homedir(), '.config', 'dsh-voice')
-/** 百炼 API Key，必需。 */
-const KEY_NAME = 'dashscope.key'
-/** 朗读设置（音色、模型、每轮上限），可选；插件页里改，会写回这里。 */
+/** 朗读设置（音色、模型、每轮上限等），可选；插件页里改，会写回这里。 */
 const SETTINGS_NAME = 'voice-reply.json'
 
-const DEFAULT_HOST = 'dashscope.aliyuncs.com'
+const DEFAULT_DASHSCOPE_HOST = 'dashscope.aliyuncs.com'
+const DEFAULT_DEEPSEEK_HOST = 'api.deepseek.com'
 /** host 只能手改设置文件：只收主机名，防止拼进奇怪的 URL。 */
 const HOST_PATTERN = /^[A-Za-z0-9.-]+$/
 /** 每轮最多念多少字，0 = 不限。 */
@@ -40,9 +39,38 @@ const DEFAULT_TURN_LIMIT = 800
 /** 语音通话：停顿多久算说完（毫秒）。 */
 const CALL_SILENCES = [800, 1000, 1200, 1500, 2000, 3000]
 const DEFAULT_CALL_SILENCE = 1200
-/** 朗读语速（百炼 speech_rate，变速不变调）。一段朗读开始后就改不了，新语速从下一段起生效。 */
+/** 朗读语速（变速不变调：百炼走服务端 speech_rate，DeepSeek 走浏览器端 WSOLA）。新语速从下一段起生效。 */
 const SPEECH_RATES = [1, 1.25, 1.5, 2]
 const DEFAULT_SPEECH_RATE = 1
+
+export const PROVIDERS = [
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    description: '直接用 DeepSeek API Key，免开阿里云',
+    keyLabel: 'DeepSeek API Key',
+    keyHint: '填写 DeepSeek 开放平台的 API Key。输入的 Key 将发送到 DSH 服务端保存。',
+    keyFile: 'deepseek.key',
+    defaultHost: DEFAULT_DEEPSEEK_HOST,
+  },
+  {
+    id: 'dashscope',
+    label: '阿里百炼',
+    description: '1 元 / 万字符 · 48 种音色与方言',
+    keyLabel: '百炼 API Key',
+    keyHint: '请使用百炼中国（北京）地域的 API Key。输入的 Key 将发送到 DSH 服务端保存。',
+    keyFile: 'dashscope.key',
+    defaultHost: DEFAULT_DASHSCOPE_HOST,
+  },
+]
+
+const providerOf = (id) => PROVIDERS.find((p) => p.id === id)
+
+/** DeepSeek 官方音色：id、名字、简介、性别。 */
+const DEEPSEEK_VOICES = [
+  ['stella', '海星', '自然亲切女声（默认）', '女'],
+  ['tide', '暗潮', '沉稳自然男声', '男'],
+]
 
 /** 普通话音色：id、名字、简介、性别。 */
 const MANDARIN = [
@@ -101,19 +129,30 @@ const DIALECT = [
 
 const voicesOf = (rows, group) => rows.map(([id, name, desc, gender]) => ({ id, name, desc, gender, group }))
 
+const DEEPSEEK_MODEL = {
+  id: 'deepseek-tts',
+  provider: 'deepseek',
+  serverRate: false,
+  label: 'DeepSeek 语音合成',
+  price: '限时 1.5 元 / 万字符（原价 3 元），一个汉字算 2 个字符',
+  voices: voicesOf(DEEPSEEK_VOICES, '官方音色'),
+}
+
+const DASHSCOPE_MODEL = {
+  id: 'qwen3-tts-flash-realtime',
+  provider: 'dashscope',
+  serverRate: true,
+  label: '千问3 实时语音合成',
+  price: '每万字符 1 元，一个汉字算 2 个字符',
+  voices: [...voicesOf(MANDARIN, '普通话'), ...voicesOf(DIALECT, '方言')],
+}
+
 /**
- * 能选的模型和音色。2026-11-05 在北京地域实测：只有 qwen3-tts-flash-realtime 能走这套实时协议，
- * 文档里的 48 个音色都能用；别的实时模型名一律被服务端用 1007 关掉连接（Model not exist），
- * CosyVoice、Sambert、Qwen-Audio-TTS 是另一套协议（/api-ws/v1/inference），这里不支持。
+ * 能选的模型和音色：
+ * - DeepSeek：wss://api.deepseek.com/v1/tools/tts，免开阿里云，直接复用 DeepSeek API Key；
+ * - 阿里百炼：qwen3-tts-flash-realtime，48 种音色与方言，单价更低。
  */
-export const CATALOG = [
-  {
-    id: 'qwen3-tts-flash-realtime',
-    label: '千问3 实时语音合成',
-    price: '每万字符 1 元，一个汉字算 2 个字符',
-    voices: [...voicesOf(MANDARIN, '普通话'), ...voicesOf(DIALECT, '方言')],
-  },
-]
+export const CATALOG = [DEEPSEEK_MODEL, DASHSCOPE_MODEL]
 
 const modelOf = (id) => CATALOG.find((m) => m.id === id)
 
@@ -186,6 +225,7 @@ export function readTestClip(dir, name) {
     return undefined
   }
 }
+
 const BODY_LIMIT = 64 * 1024
 /** /turn 收一段最长 8 秒的 16 kHz PCM16（base64 约 341 KB）。 */
 const TURN_BODY_LIMIT = 512 * 1024
@@ -193,8 +233,12 @@ const TURN_BODY_LIMIT = 512 * 1024
 const ASR_BODY_LIMIT = 3 * 1024 * 1024
 /** 一段朗读最多收这么多字，防止前端出错时无限追加。 */
 const TEXT_LIMIT = 20000
-/** 单次发给百炼的文字上限（分片发）。 */
+/** 单次发给云端的文字分片上限。 */
 const APPEND_CHUNK = 1000
+/** DeepSeek 单次会话上限为 10,000 计费字符（汉字算 2）与 64 KiB，留一点余量避免整段报错中断。 */
+const DEEPSEEK_BILLING_LIMIT = 9800
+const DEEPSEEK_BYTE_LIMIT = 60 * 1024
+const HAN_CHAR = /\p{Script=Han}/u
 /** 这么久没有新文字也没收到 finish，就当前端走了，自动 finish。 */
 const IDLE_FINISH_MS = 60_000
 /** 一段朗读最长存活时间。 */
@@ -210,13 +254,45 @@ const FRAME_PCM = 1
 const FRAME_ERROR = 2
 const FRAME_END = 3
 
+/** 语音通话的收音灵敏度：低（环境吵时用）、中、高（说话轻时用）。门限数值在浏览器端 call/vad.ts。 */
+const CALL_SENSITIVITIES = ['lowest', 'low', 'medium', 'high']
+const DEFAULT_CALL_SENSITIVITY = 'medium'
+
+/** 读某个服务商的 Key 文件，不存在或为空返回 undefined。 */
+function readProviderKey(dir, providerId) {
+  const provider = providerOf(providerId)
+  if (provider === undefined) return undefined
+  try {
+    const key = readFileSync(join(dir, provider.keyFile), 'utf8').trim()
+    return key === '' ? undefined : key
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * 推断默认模型：
+ * - 新安装默认选 DeepSeek（开箱直接填 DeepSeek Key）；
+ * - 老用户（磁盘已有 dashscope.key、或旧版 voice-reply.json 里存过百炼音色 / host）自动保持百炼不变。
+ */
+function resolveDefaultModel(source, hasDashScopeKey) {
+  const explicit = modelOf(source.model)
+  if (explicit !== undefined) return explicit
+  const hasLegacyBailianHint =
+    hasDashScopeKey
+    || (typeof source.host === 'string' && HOST_PATTERN.test(source.host))
+    || (typeof source.voice === 'string' && DASHSCOPE_MODEL.voices.some((v) => v.id === source.voice))
+  return hasLegacyBailianHint ? DASHSCOPE_MODEL : DEEPSEEK_MODEL
+}
+
 /** 把设置文件里的值收拾成能用的：不认识的值退回默认。 */
-function normalizePrefs(raw) {
+function normalizePrefs(raw, hasDashScopeKey = false) {
   const source = raw !== null && typeof raw === 'object' ? raw : {}
-  const model = modelOf(source.model) ?? CATALOG[0]
+  const model = resolveDefaultModel(source, hasDashScopeKey)
   const voice = model.voices.some((v) => v.id === source.voice) ? source.voice : model.voices[0].id
   const turnLimit = TURN_LIMITS.includes(source.turnLimit) ? source.turnLimit : DEFAULT_TURN_LIMIT
-  const host = typeof source.host === 'string' && HOST_PATTERN.test(source.host) ? source.host : DEFAULT_HOST
+  const host = typeof source.host === 'string' && HOST_PATTERN.test(source.host) ? source.host : DEFAULT_DASHSCOPE_HOST
+  const deepseekHost = typeof source.deepseekHost === 'string' && HOST_PATTERN.test(source.deepseekHost) ? source.deepseekHost : DEFAULT_DEEPSEEK_HOST
   const callSilenceMs = CALL_SILENCES.includes(source.callSilenceMs) ? source.callSilenceMs : DEFAULT_CALL_SILENCE
   const callBargeIn = source.callBargeIn === true
   const callSmartTurn = source.callSmartTurn === true
@@ -229,12 +305,10 @@ function normalizePrefs(raw) {
   const speechRate = SPEECH_RATES.includes(source.speechRate) ? source.speechRate : DEFAULT_SPEECH_RATE
   const holdEnabled = source.holdEnabled !== false
   const replyEnabled = source.replyEnabled !== false
-  return { host, model: model.id, voice, turnLimit, callSilenceMs, callBargeIn, callSmartTurn, callKeepOnLock, speakWhole, callSensitivity, callVoiceModel, callCloudAsr, speechRate, holdEnabled, replyEnabled }
+  const provider = model.provider
+  const providerHost = provider === 'deepseek' ? deepseekHost : host
+  return { host, deepseekHost, provider, providerHost, model: model.id, voice, turnLimit, callSilenceMs, callBargeIn, callSmartTurn, callKeepOnLock, speakWhole, callSensitivity, callVoiceModel, callCloudAsr, speechRate, holdEnabled, replyEnabled }
 }
-
-/** 语音通话的收音灵敏度：低（环境吵时用）、中、高（说话轻时用）。门限数值在浏览器端 call/vad.ts。 */
-const CALL_SENSITIVITIES = ['lowest', 'low', 'medium', 'high']
-const DEFAULT_CALL_SENSITIVITY = 'medium'
 
 /** 读一个 JSON 对象文件；没有、写坏了或不是对象都当空对象。 */
 function readJsonFile(file) {
@@ -247,34 +321,55 @@ function readJsonFile(file) {
 }
 
 /**
- * 读配置：Key 文件必需；voice-reply.json 可选（音色、模型、每轮上限；host 只能手改）。
+ * 读配置：检查当前选中服务商的 Key 文件；voice-reply.json 可选（音色、模型、每轮上限；host 只能手改）。
  * 没有 Key 时也带上当前设置，设置页照样能打开，只是提示去放 Key。
  * @param {string} [dir]
+ * @param {string} [overrideModelId] 试听等场景临时按指定模型读取对应服务商的 Key 与 host
  */
-export function readSettings(dir = CONFIG_DIR) {
-  const prefs = normalizePrefs(readJsonFile(join(dir, SETTINGS_NAME)))
-  const keyFile = join(dir, KEY_NAME)
-  let key
+export function readSettings(dir = CONFIG_DIR, overrideModelId) {
+  const hasDashScopeKey = readProviderKey(dir, 'dashscope') !== undefined
+  const raw = readJsonFile(join(dir, SETTINGS_NAME))
+  const effectiveRaw = overrideModelId !== undefined ? { ...raw, model: overrideModelId } : raw
+  const prefs = normalizePrefs(effectiveRaw, hasDashScopeKey)
+  const provider = providerOf(prefs.provider) ?? PROVIDERS[0]
+  const keyFile = join(dir, provider.keyFile)
+  let text
   try {
-    key = readFileSync(keyFile, 'utf8').trim()
+    text = readFileSync(keyFile, 'utf8')
   } catch {
-    return { error: `没有找到百炼 API Key：${keyFile}`, ...prefs }
+    return { error: `没有找到 ${provider.keyLabel}：${keyFile}`, ...prefs }
   }
-  if (key === '') return { error: `百炼 API Key 文件是空的：${keyFile}`, ...prefs }
+  const key = text.trim()
+  if (key === '') return { error: `${provider.keyLabel} 文件是空的：${keyFile}`, ...prefs }
   return { key, ...prefs }
 }
 
 class BadSetting extends Error {}
 
-/** 保存百炼 Key，不写入普通设置；原子替换并限制文件权限。 */
-export function writeApiKey(dir, value) {
-  if (typeof value !== 'string') throw new BadSetting('请输入百炼 API Key')
+/**
+ * 保存指定服务商（省略时为当前选中的服务商）的 API Key，不写入普通设置；原子替换并限制文件权限。
+ * @param {string} dir
+ * @param {unknown} value
+ * @param {unknown} [providerInput]
+ */
+export function writeApiKey(dir, value, providerInput) {
+  let provider
+  if (providerInput === undefined) {
+    const hasDashScopeKey = readProviderKey(dir, 'dashscope') !== undefined
+    const prefs = normalizePrefs(readJsonFile(join(dir, SETTINGS_NAME)), hasDashScopeKey)
+    provider = providerOf(prefs.provider) ?? PROVIDERS[0]
+  } else {
+    if (typeof providerInput !== 'string') throw new BadSetting('不认识这个语音服务商')
+    provider = providerOf(providerInput)
+    if (provider === undefined) throw new BadSetting('不认识这个语音服务商')
+  }
+  if (typeof value !== 'string') throw new BadSetting(`请输入 ${provider.keyLabel}`)
   const key = value.trim()
   if (key.length === 0 || key.length > 1024 || !/^[\x21-\x7e]+$/.test(key)) {
     throw new BadSetting('API Key 不能为空，也不能包含空格或换行')
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 })
-  const file = join(dir, KEY_NAME)
+  const file = join(dir, provider.keyFile)
   const temp = `${file}.${randomUUID()}.tmp`
   try {
     writeFileSync(temp, `${key}\n`, { mode: 0o600, flag: 'wx' })
@@ -286,7 +381,7 @@ export function writeApiKey(dir, value) {
 }
 
 /**
- * 改设置：只动 model / voice / turnLimit，文件里别的字段（比如手写的 host）原样留着。
+ * 改设置：只动受管字段，文件里别的字段（比如手写的 host / deepseekHost）原样留着。
  * 先写临时文件再改名，写到一半出错也不会留下半个文件。
  * @param {string} dir
  * @param {Record<string, unknown>} patch
@@ -294,12 +389,13 @@ export function writeApiKey(dir, value) {
 export function writeSettings(dir, patch) {
   const file = join(dir, SETTINGS_NAME)
   const next = { ...readJsonFile(file) }
+  const hasDashScopeKey = readProviderKey(dir, 'dashscope') !== undefined
   if ('model' in patch) {
     if (modelOf(patch.model) === undefined) throw new BadSetting('不认识这个模型')
     next.model = patch.model
   }
   if ('voice' in patch) {
-    const model = modelOf(next.model) ?? CATALOG[0]
+    const model = resolveDefaultModel(next, hasDashScopeKey)
     if (typeof patch.voice !== 'string' || !model.voices.some((v) => v.id === patch.voice)) throw new BadSetting('这个模型没有这个音色')
     next.voice = patch.voice
   }
@@ -328,7 +424,7 @@ export function writeSettings(dir, patch) {
     next.speakWhole = patch.speakWhole
   }
   if ('callCloudAsr' in patch) {
-    if (typeof patch.callCloudAsr !== 'boolean') throw new BadSetting('「百炼识别」只能开或关')
+    if (typeof patch.callCloudAsr !== 'boolean') throw new BadSetting('「云端识别」只能开或关')
     next.callCloudAsr = patch.callCloudAsr
   }
   if ('callVoiceModel' in patch) {
@@ -349,7 +445,7 @@ export function writeSettings(dir, patch) {
     if (!CALL_SENSITIVITIES.includes(patch.callSensitivity)) throw new BadSetting('收音灵敏度只能是很低、低、中、高')
     next.callSensitivity = patch.callSensitivity
   }
-  const prefs = normalizePrefs(next)
+  const prefs = normalizePrefs(next, hasDashScopeKey)
   next.model = prefs.model
   next.voice = prefs.voice
   next.turnLimit = prefs.turnLimit
@@ -388,6 +484,48 @@ export function describeError(raw) {
   return `语音合成出错：${message || code || '未知错误'}`
 }
 
+/** DeepSeek TTS 的报错翻成能看懂的话。 */
+export function describeDeepSeekError(codeInput, messageInput) {
+  const code = typeof codeInput === 'string' ? codeInput : ''
+  const message = typeof messageInput === 'string' ? messageInput : ''
+  const joined = `${code} ${message}`
+  if (/\b401\b|unauthorized|authentication|invalid.*api.?key|api.?key.*invalid/i.test(joined)) {
+    return 'DeepSeek API Key 无效，请重新创建并保存'
+  }
+  if (/\b402\b|insufficient|balance/i.test(joined)) {
+    return 'DeepSeek 账户余额不足，请到开放平台充值'
+  }
+  if (/\b429\b|rate|limit|too many/i.test(joined)) {
+    return 'DeepSeek 并发请求超限，稍后再试'
+  }
+  if (code === 'content_filter' || /content exists risk|content_filter/i.test(joined)) {
+    return '这段内容未通过 DeepSeek 安全审核，无法朗读'
+  }
+  if (code === 'invalid_input') {
+    return `DeepSeek 无法朗读这段文字${message ? `：${message}` : ''}`
+  }
+  if (code === 'input_timeout') {
+    return '等待文字超时，朗读已结束'
+  }
+  return `语音合成出错：${message || code || '未知错误'}`
+}
+
+/** 按 DeepSeek 计费字符（汉字算 2、其他算 1）与字节上限裁剪文本。 */
+function sliceDeepSeekBudget(text, usedChars, usedBytes) {
+  let chars = usedChars
+  let bytes = usedBytes
+  let out = ''
+  for (const ch of text) {
+    const cCost = HAN_CHAR.test(ch) ? 2 : 1
+    const bCost = Buffer.byteLength(ch, 'utf8')
+    if (chars + cCost > DEEPSEEK_BILLING_LIMIT || bytes + bCost > DEEPSEEK_BYTE_LIMIT) break
+    chars += cCost
+    bytes += bCost
+    out += ch
+  }
+  return { accepted: out, usedChars: chars, usedBytes: bytes }
+}
+
 function frame(type, payload) {
   const head = Buffer.alloc(5)
   head.writeUInt8(type, 0)
@@ -395,7 +533,7 @@ function frame(type, payload) {
   return Buffer.concat([head, payload])
 }
 
-/** 一段朗读：一条到百炼的 WebSocket，加一个（最多一个）在等音频的浏览器响应。 */
+/** 一段朗读：一条到云端服务商的 WebSocket，加一个（最多一个）在等音频的浏览器响应。 */
 class Utterance {
   /** @param {string} id @param {(u: Utterance) => void} onGone */
   constructor(id, onGone) {
@@ -404,13 +542,17 @@ class Utterance {
     this.createdAt = Date.now()
     /** @type {WebSocket | undefined} */
     this.ws = undefined
+    this.provider = 'dashscope'
     this.ready = false
     /** @type {string[]} */
     this.pendingText = []
+    this.sentAnyText = false
     this.finishRequested = false
     this.finishSent = false
     this.ended = false
     this.textLength = 0
+    this.dsBillingChars = 0
+    this.dsBytes = 0
     /** @type {Buffer[]} */
     this.buffered = []
     this.bufferedBytes = 0
@@ -421,12 +563,24 @@ class Utterance {
     this.touch()
   }
 
-  /** @param {{ key: string, host: string, model: string, voice: string, speechRate?: number }} settings */
-  connect(settings) {
+  /**
+   * @param {{ provider?: 'dashscope' | 'deepseek', key: string, host: string, model: string, voice: string, speechRate?: number }} settings
+   * @param {(url: string, options: { headers: Record<string, string> }) => WebSocket} [createWs]
+   */
+  connect(settings, createWs = (url, opts) => new WebSocket(url, opts)) {
+    this.provider = settings.provider === 'deepseek' ? 'deepseek' : 'dashscope'
+    if (this.provider === 'deepseek') {
+      this.connectDeepSeek(settings, createWs)
+    } else {
+      this.connectDashScope(settings, createWs)
+    }
+  }
+
+  connectDashScope(settings, createWs) {
     const url = `wss://${settings.host}/api-ws/v1/realtime?model=${encodeURIComponent(settings.model)}`
     let ws
     try {
-      ws = new WebSocket(url, { headers: { Authorization: `Bearer ${settings.key}` } })
+      ws = createWs(url, { headers: { Authorization: `Bearer ${settings.key}` } })
     } catch (error) {
       this.fail(`连不上百炼：${error instanceof Error ? error.message : String(error)}`)
       return
@@ -473,6 +627,63 @@ class Utterance {
     })
   }
 
+  connectDeepSeek(settings, createWs) {
+    const url = `wss://${settings.host}/v1/tools/tts?voice_id=${encodeURIComponent(settings.voice)}&format=pcm&filter_markdown=true`
+    let ws
+    try {
+      ws = createWs(url, { headers: { Authorization: `Bearer ${settings.key}` } })
+    } catch (error) {
+      this.fail(`连不上 DeepSeek：${error instanceof Error ? error.message : String(error)}`)
+      return
+    }
+    ws.binaryType = 'arraybuffer'
+    this.ws = ws
+    const send = (event) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(event))
+    }
+    this.send = send
+    ws.addEventListener('open', () => {
+      if (this.ended) return
+      this.ready = true
+      this.flushText()
+    })
+    ws.addEventListener('message', (message) => {
+      if (this.ended) return
+      if (typeof message.data !== 'string') {
+        const pcm = Buffer.from(message.data)
+        if (pcm.length > 0) this.emit(frame(FRAME_PCM, pcm))
+        return
+      }
+      let event
+      try {
+        event = JSON.parse(message.data)
+      } catch {
+        return
+      }
+      if (event?.event === 'finish') {
+        if (event.code === 'success') this.end()
+        else this.fail(describeDeepSeekError(event.code, event.message))
+      } else if (event?.error !== undefined || event?.code !== undefined || event?.message !== undefined) {
+        const inner = event.error ?? event
+        this.fail(describeDeepSeekError(inner?.code ?? event.code, inner?.message ?? event.message))
+      }
+    })
+    ws.addEventListener('close', (event) => {
+      if (this.ended) return
+      const reason = typeof event?.reason === 'string' ? event.reason.trim() : ''
+      this.fail(reason === '' ? '和 DeepSeek 的连接断开了，请检查 API Key 或账户余额' : describeDeepSeekError('', reason))
+    })
+    ws.addEventListener('error', (event) => {
+      if (this.ended) return
+      const detail = String(event?.error?.message ?? event?.message ?? '')
+      if (/\b(401|402|429)\b|unauthorized|balance|rate/i.test(detail)) {
+        this.fail(describeDeepSeekError('', detail))
+      } else {
+        this.fail('和 DeepSeek 的连接出错了，请检查网络、API Key 或账户余额')
+      }
+    })
+  }
+
   touch() {
     clearTimeout(this.idleTimer)
     this.idleTimer = setTimeout(() => this.finish(), IDLE_FINISH_MS)
@@ -483,7 +694,14 @@ class Utterance {
     if (this.ended || this.finishRequested) return false
     if (this.textLength + text.length > TEXT_LIMIT) return false
     this.textLength += text.length
-    for (let at = 0; at < text.length; at += APPEND_CHUNK) this.pendingText.push(text.slice(at, at + APPEND_CHUNK))
+    let body = text
+    if (this.provider === 'deepseek') {
+      const sliced = sliceDeepSeekBudget(text, this.dsBillingChars, this.dsBytes)
+      this.dsBillingChars = sliced.usedChars
+      this.dsBytes = sliced.usedBytes
+      body = sliced.accepted
+    }
+    for (let at = 0; at < body.length; at += APPEND_CHUNK) this.pendingText.push(body.slice(at, at + APPEND_CHUNK))
     this.touch()
     this.flushText()
     return true
@@ -498,6 +716,24 @@ class Utterance {
 
   flushText() {
     if (!this.ready || this.ended) return
+    if (this.provider === 'deepseek') {
+      for (const text of this.pendingText) {
+        if (text !== '') {
+          this.sentAnyText = true
+          this.send({ event: 'text', text })
+        }
+      }
+      this.pendingText = []
+      if (this.finishRequested && !this.finishSent) {
+        this.finishSent = true
+        if (!this.sentAnyText) {
+          this.end()
+          return
+        }
+        this.send({ event: 'finish_text' })
+      }
+      return
+    }
     for (const text of this.pendingText) this.send({ type: 'input_text_buffer.append', text })
     this.pendingText = []
     if (this.finishRequested && !this.finishSent) {
@@ -625,25 +861,34 @@ function admitted(scope, ctx, req) {
 
 /**
  * 路由处理（单独导出，方便测试）。
- * @param {{ admit: (req: import('node:http').IncomingMessage) => boolean, settings?: () => ReturnType<typeof readSettings>, configDir?: string, calls?: CallRegistry, turn?: { predict(samples: Float32Array): Promise<number>, stop(): void } }} options
+ * @param {{ admit: (req: import('node:http').IncomingMessage) => boolean, settings?: (overrideModelId?: string) => ReturnType<typeof readSettings>, configDir?: string, calls?: CallRegistry, turn?: { predict(samples: Float32Array): Promise<number>, stop(): void }, cloudTranscribe?: typeof cloudTranscribe, createWebSocket?: (url: string, options: { headers: Record<string, string> }) => WebSocket }} options
  */
 export function createHandler(options) {
   const configDir = options.configDir ?? CONFIG_DIR
-  const settingsOf = options.settings ?? (() => readSettings(configDir))
+  const settingsOf = options.settings ?? ((overrideModelId) => readSettings(configDir, overrideModelId))
   const calls = options.calls ?? new CallRegistry()
   // 第一次有人问才启动工作线程
   const turn = options.turn ?? new SmartTurn()
 
-  /** 设置页要的东西：现在的设置、能选的值、Key 有没有准备好（不含 Key 本身）。 */
+  /** 设置页要的东西：现在的设置、能选的值、各服务商 Key 有没有准备好（不含 Key 本身）。 */
   function settingsView() {
     const settings = settingsOf()
-    const prefs = normalizePrefs(settings)
+    const hasDashScopeKey = readProviderKey(configDir, 'dashscope') !== undefined
+    const prefs = normalizePrefs(settings, hasDashScopeKey)
+    const providers = PROVIDERS.map((p) => ({
+      id: p.id,
+      label: p.label,
+      description: p.description,
+      keyLabel: p.keyLabel,
+      keyHint: p.keyHint,
+      ready: readProviderKey(configDir, p.id) !== undefined,
+    }))
     return {
       ready: !('error' in settings),
       error: 'error' in settings ? String(settings.error) : null,
       settings: { model: prefs.model, voice: prefs.voice, turnLimit: prefs.turnLimit, callSilenceMs: prefs.callSilenceMs, callBargeIn: prefs.callBargeIn, callSmartTurn: prefs.callSmartTurn, callKeepOnLock: prefs.callKeepOnLock, speakWhole: prefs.speakWhole, callSensitivity: prefs.callSensitivity, callVoiceModel: prefs.callVoiceModel, callCloudAsr: prefs.callCloudAsr, speechRate: prefs.speechRate, holdEnabled: prefs.holdEnabled, replyEnabled: prefs.replyEnabled },
       vadVersion: VAD_VERSION,
-      catalog: { models: CATALOG, turnLimits: TURN_LIMITS, callSilences: CALL_SILENCES, speechRates: SPEECH_RATES },
+      catalog: { providers, models: CATALOG, turnLimits: TURN_LIMITS, callSilences: CALL_SILENCES, speechRates: SPEECH_RATES },
     }
   }
 
@@ -682,7 +927,7 @@ export function createHandler(options) {
       return sendJson(res, status, { error: '请求格式不正确' })
     }
     try {
-      writeApiKey(configDir, body?.key)
+      writeApiKey(configDir, body?.key, body?.provider)
     } catch (error) {
       if (error instanceof BadSetting) return sendJson(res, 400, { error: error.message })
       return sendJson(res, 500, { error: '保存 API Key 失败，请检查服务端配置目录的写入权限' })
@@ -692,7 +937,7 @@ export function createHandler(options) {
   /** @type {Map<string, Utterance>} */
   const utterances = new Map()
   const gone = (/** @type {Utterance} */ u) => {
-    // 百炼报错得很快时，浏览器可能还没来取音频；留一会儿，让它还能拿到错误帧
+    // 报错得很快时，浏览器可能还没来取音频；留一会儿，让它还能拿到错误帧
     if (u.res === undefined && !u.cancelled) {
       const timer = setTimeout(() => {
         if (utterances.get(u.id) === u) utterances.delete(u.id)
@@ -732,7 +977,7 @@ export function createHandler(options) {
     if (action === '/status') {
       if (req.method !== 'GET') return sendJson(res, 405, { error: 'method not allowed' })
       const settings = settingsOf()
-      return sendJson(res, 200, 'error' in settings ? { ready: false, error: settings.error } : { ready: true, voice: settings.voice, model: settings.model })
+      return sendJson(res, 200, 'error' in settings ? { ready: false, error: settings.error } : { ready: true, voice: settings.voice, model: settings.model, provider: settings.provider })
     }
 
     if (action === '/call/debug') {
@@ -761,7 +1006,7 @@ export function createHandler(options) {
     }
 
     if (action === '/asr') {
-      // 通话识别走百炼（设置里打开「百炼识别」时）：浏览器发来 16 kHz WAV（base64），回识别出的文字
+      // 通话云端识别（设置里打开「云端识别」时）：浏览器发来 16 kHz WAV（base64），按当前服务商调用 ASR
       if (!isJsonRequest(req)) return sendJson(res, 415, { error: 'expected application/json' })
       let asrBody
       try {
@@ -775,10 +1020,12 @@ export function createHandler(options) {
       if (audio === '' || !/^[A-Za-z0-9+/]+=*$/.test(audio)) return sendJson(res, 400, { error: 'bad audio' })
       const settings = settingsOf()
       if ('error' in settings) return sendJson(res, 503, { error: String(settings.error) })
+      const provider = settings.provider === 'deepseek' ? 'deepseek' : 'dashscope'
+      const host = settings.providerHost ?? (provider === 'deepseek' ? DEFAULT_DEEPSEEK_HOST : DEFAULT_DASHSCOPE_HOST)
       const startedAt = Date.now()
       try {
-        const text = await (options.cloudTranscribe ?? cloudTranscribe)({ key: settings.key, host: settings.host, wavBase64: audio })
-        calls.trace({ asr: 'cloud', ms: Date.now() - startedAt, chars: text.length })
+        const text = await (options.cloudTranscribe ?? cloudTranscribe)({ provider, key: settings.key, host, wavBase64: audio })
+        calls.trace({ asr: provider, ms: Date.now() - startedAt, chars: text.length })
         return sendJson(res, 200, { text })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
@@ -839,11 +1086,13 @@ export function createHandler(options) {
 
     if (action === '/open') {
       if (utterances.has(id)) return sendJson(res, 409, { error: 'utterance exists' })
-      const settings = settingsOf()
+      if (typeof body.model === 'string' && modelOf(body.model) === undefined) {
+        return sendJson(res, 400, { error: '不认识这个模型' })
+      }
+      const settings = settingsOf(typeof body.model === 'string' ? body.model : undefined)
       if ('error' in settings) return sendJson(res, 503, { error: settings.error })
       // 试听可以临时换模型、音色（不改存着的设置），但都得在可选范围里
       const model = modelOf(typeof body.model === 'string' ? body.model : settings.model) ?? CATALOG[0]
-      if (typeof body.model === 'string' && model.id !== body.model) return sendJson(res, 400, { error: '不认识这个模型' })
       const voice = typeof body.voice === 'string'
         ? body.voice
         : (model.voices.some((v) => v.id === settings.voice) ? settings.voice : model.voices[0].id)
@@ -859,8 +1108,10 @@ export function createHandler(options) {
       }
       const u = new Utterance(id, gone)
       utterances.set(id, u)
-      u.connect({ key: settings.key, host: settings.host ?? DEFAULT_HOST, model: model.id, voice, speechRate })
-      return sendJson(res, 200, { ok: true })
+      const provider = model.provider === 'deepseek' ? 'deepseek' : 'dashscope'
+      const host = settings.providerHost ?? settings.host ?? (provider === 'deepseek' ? DEFAULT_DEEPSEEK_HOST : DEFAULT_DASHSCOPE_HOST)
+      u.connect({ provider, key: settings.key, host, model: model.id, voice, speechRate }, options.createWebSocket)
+      return sendJson(res, 200, { ok: true, clientRate: model.serverRate ? 1 : speechRate })
     }
 
     const u = utterances.get(id)

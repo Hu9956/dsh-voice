@@ -1,3 +1,4 @@
+import { Banner } from '@kewen/dsh-ui'
 import { useEffect, useId, useState } from 'react'
 import { Row, Switch } from './SettingsParts'
 import { loadSettings, saveSettings, useSettings } from './settings'
@@ -26,10 +27,24 @@ export function HoldSettings() {
   return (
     <>
       <Row label="按住说话" htmlFor={id} hint="在输入框按住说话，松开后识别并插入草稿。关闭后恢复官方语音输入按钮。">
-        <Switch id={id} checked={view?.settings.holdEnabled !== false} disabled={view === null || saving} onChange={(next) => void change(next)} />
+        <Switch
+          id={id}
+          label="按住说话"
+          checked={view?.settings.holdEnabled !== false}
+          disabled={view === null || saving}
+          onChange={(next) => void change(next)}
+        />
       </Row>
-      {view === null && error !== null && <p className="vr-settings-note vr-settings-error">读不到设置：{error}</p>}
-      {saveError !== null && <p className="vr-settings-note vr-settings-error" role="alert">没保存上：{saveError}</p>}
+      {view === null && error !== null && (
+        <div className="vr-card-banner">
+          <Banner tone="error">读不到设置：{error}</Banner>
+        </div>
+      )}
+      {saveError !== null && (
+        <div className="vr-card-banner">
+          <Banner tone="error">没保存上：{saveError}</Banner>
+        </div>
+      )}
     </>
   )
 }

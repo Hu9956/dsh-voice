@@ -139,6 +139,7 @@ export function useCallVisual(phase: CallPhase) {
     let to = from
     let fade = 1
     let level = 0
+    let lastLevelProp = ''
     let time = 0
     let last = performance.now()
     let frame = 0
@@ -169,7 +170,11 @@ export function useCallVisual(phase: CallPhase) {
         level = smooth(level, target, dt)
         time += (dt / 1000) * (0.25 + level * 0.9) * (current === 'think' ? 1.6 : 1)
       }
-      avatarRef.current?.style.setProperty('--vr-level', level.toFixed(3))
+      const nextProp = level.toFixed(3)
+      if (nextProp !== lastLevelProp) {
+        lastLevelProp = nextProp
+        avatarRef.current?.style.setProperty('--vr-level', nextProp)
+      }
       // 平线、静止时不用每帧重画
       const moving = !still && level > 0.002
       if (!dirty && !fading && !moving && Math.abs(level - previous) < 0.001) return

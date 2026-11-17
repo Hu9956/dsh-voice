@@ -18,8 +18,19 @@ export interface VoiceOption {
   group?: string
 }
 
+export interface ProviderOption {
+  id: string
+  label: string
+  description?: string
+  keyLabel?: string
+  keyHint?: string
+  ready: boolean
+}
+
 export interface ModelOption {
   id: string
+  provider?: string
+  serverRate?: boolean
   label: string
   price: string
   voices: VoiceOption[]
@@ -44,9 +55,9 @@ export interface Settings {
   speakWhole?: boolean
   /** 语音通话：用人声模型判断是不是在说话（风扇、空调声不算）。旧版服务端没有这一项。 */
   callVoiceModel?: boolean
-  /** 语音通话：用百炼 qwen3-asr-flash 识别（关着用官方本机 SenseVoice）。旧版服务端没有这一项。 */
+  /** 语音通话：用云端识别（跟随当前所选服务商；关着用官方本机 SenseVoice）。旧版服务端没有这一项。 */
   callCloudAsr?: boolean
-  /** 朗读语速（百炼 speech_rate，变速不变调），1 是正常。旧版服务端没有这一项。 */
+  /** 朗读语速（变速不变调），1 是正常。旧版服务端没有这一项。 */
   speechRate?: number
   /** 按住说话与朗读、通话可分别启停。 */
   holdEnabled?: boolean
@@ -54,11 +65,11 @@ export interface Settings {
 }
 
 export interface SettingsView {
-  /** Key 准备好了没有。 */
+  /** 当前所选服务商的 Key 准备好了没有。 */
   ready: boolean
   error: string | null
   settings: Settings
-  catalog: { models: ModelOption[], turnLimits: number[], callSilences?: number[], speechRates?: number[] }
+  catalog: { providers?: ProviderOption[], models: ModelOption[], turnLimits: number[], callSilences?: number[], speechRates?: number[] }
   /** 人声模型文件的版本（拼进下载地址做缓存）。旧版服务端没有，也就没有人声模型。 */
   vadVersion?: string
 }
@@ -135,13 +146,13 @@ export function saveSettings(patch: Partial<Settings>): Promise<SettingsView> {
   return result
 }
 
-/** 保存百炼 Key，与其他设置共用队列；服务端只返回不含 Key 的设置视图。 */
-export function saveApiKey(key: string): Promise<SettingsView> {
+/** 保存指定服务商（省略时为当前所选服务商）的 API Key，与其他设置共用队列；服务端只返回不含 Key 的设置视图。 */
+export function saveApiKey(key: string, provider?: string): Promise<SettingsView> {
   const result = saveQueue.then(async () => {
     const view = acceptView(await request({
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ key }),
+      body: JSON.stringify(provider === undefined ? { key } : { key, provider }),
     }, '/key'))
     set({ view, error: null })
     return view
