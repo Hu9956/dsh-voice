@@ -1,6 +1,7 @@
 import { Button } from '@kewen/dsh-ui'
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Phase } from './controller'
+import { createPlaceholderController, type PlaceholderMode } from './placeholder'
 import { sessionEntry, usePhase, type InputActions } from './store'
 
 type Hook<S> = <T>(select: (state: S) => T) => T
@@ -23,10 +24,6 @@ const MOVE_TOLERANCE_PX = 6
 const TOUCH_SLOP_PX = 10
 /** 手机：录音中手指上移超过这个距离，松手就取消。 */
 const CANCEL_SWIPE_PX = 60
-
-/** 输入框为空时的提示文字（只替换官方默认那一句）。 */
-const HINT_DESKTOP = (official: string) => `${official}, 按住鼠标语音输入`
-const HINT_PHONE = () => '按住说话，轻点打字'
 
 function usePhone(): boolean {
   const [phone, setPhone] = useState(() => window.matchMedia(PHONE_QUERY).matches)
@@ -70,7 +67,7 @@ export function HoldOverlay({ sessionId, useInput, useSession, inputActions }: H
   const allowed = !unavailable && inputActions !== undefined && inputPlain
   useDesktopHold(card, sessionId, !phone && allowed)
   usePhoneHold(card, sessionId, phone && allowed)
-  usePlaceholder(card, allowed ? (phone ? HINT_PHONE : HINT_DESKTOP) : undefined)
+  usePlaceholder(card, allowed ? (phone ? 'phone' : 'desktop') : undefined)
   useNoAutoKeyboard(card, sessionId, phone && allowed)
   useBlurOnKeyboardClose(card, phone && allowed)
   useEscapeCancel(sessionId, phase)
@@ -113,61 +110,21 @@ function draftEnd(card: HTMLElement | null): number | undefined {
 }
 
 /**
- * 官方提示文字：只在显示官方默认那一句时换成我们的提示（禁用、已归档、计划模式等其他提示保留原文）。
+ * 官方提示文字：只在显示官方默认那一句时换成带内联麦克风图标的提示（禁用、已归档、计划模式等其他提示保留原文）。
  * 官方每次渲染会写回自己的值，所以用 MutationObserver 跟着改。
  */
-function usePlaceholder(card: HTMLElement | null, hintFor: ((official: string) => string) | undefined): void {
+function usePlaceholder(card: HTMLElement | null, mode: PlaceholderMode | undefined): void {
   useEffect(() => {
-    if (card === null || hintFor === undefined) return
-    const DEFAULTS = new Set([
-      '发消息或创建任务, / 调用指令, @ 文件或对话',
-      'Message or run a task, / commands, @ files or sessions',
-    ])
-    const originals = new Map<Element, string>()
-    const hints = new Set<string>()
-    let applying = false
-    const apply = () => {
-      if (applying) return
-      applying = true
-      try {
-        const editor = editorOf(card)
-        if (editor !== null) {
-          const value = editor.getAttribute('data-placeholder')
-          if (value !== null && DEFAULTS.has(value)) {
-            const hint = hintFor(value)
-            hints.add(hint)
-            originals.set(editor, value)
-            editor.setAttribute('data-placeholder', hint)
-            if (editor.getAttribute('aria-label') === value) editor.setAttribute('aria-label', hint)
-          }
-        }
-        const shown = card.querySelector('[data-composer-placeholder]')
-        if (shown !== null && shown.textContent !== null && DEFAULTS.has(shown.textContent)) {
-          const hint = hintFor(shown.textContent)
-          hints.add(hint)
-          originals.set(shown, shown.textContent)
-          shown.textContent = hint
-        }
-      } finally {
-        applying = false
-      }
-    }
-    apply()
-    const observer = new MutationObserver(apply)
+    if (card === null || mode === undefined) return
+    const controller = createPlaceholderController(card, editorOf, mode)
+    controller.apply()
+    const observer = new MutationObserver(() => controller.apply())
     observer.observe(card, { subtree: true, childList: true, characterData: true, attributes: true, attributeFilter: ['data-placeholder'] })
     return () => {
       observer.disconnect()
-      for (const [element, value] of originals) {
-        if (!element.isConnected) continue
-        if (element.hasAttribute('data-composer-placeholder')) {
-          if (hints.has(element.textContent ?? '')) element.textContent = value
-        } else if (hints.has(element.getAttribute('data-placeholder') ?? '')) {
-          element.setAttribute('data-placeholder', value)
-          if (hints.has(element.getAttribute('aria-label') ?? '')) element.setAttribute('aria-label', value)
-        }
-      }
+      controller.restore()
     }
-  }, [card, hintFor])
+  }, [card, mode])
 }
 
 /** 手指在输入卡片里按下后这么久之内获得的焦点，算用户自己点的。 */

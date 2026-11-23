@@ -1,6 +1,6 @@
 {
   "name": "@kewen/dsh-voice",
-  "version": "1.1.4",
+  "version": "1.1.6",
   "repository": {
     "type": "git",
     "url": "https://github.com/Hu9956/dsh-voice.git"
@@ -57,7 +57,7 @@
   "scripts": {
     "bundle": "node run.mjs bundle",
     "typecheck": "node run.mjs typecheck",
-    "test": "node --test tests/speakify.test.ts tests/time-stretch.test.ts tests/pacing.test.ts tests/retry.test.ts tests/host.test.js tests/settings.test.js tests/settings-client.test.ts tests/call.test.js tests/vad.test.ts tests/controller.test.ts tests/intent.test.ts tests/controller-v2.test.ts tests/controller-turn.test.ts tests/controller-compose.test.ts tests/draft.test.ts tests/meter.test.ts tests/glass.test.ts tests/noise-meter.test.ts tests/bridge.test.ts tests/voice-vad.test.js tests/asr.test.js tests/turn.test.js"
+    "test": "node --test tests/speakify.test.ts tests/time-stretch.test.ts tests/pacing.test.ts tests/retry.test.ts tests/host.test.js tests/settings.test.js tests/settings-client.test.ts tests/call.test.js tests/vad.test.ts tests/controller.test.ts tests/intent.test.ts tests/controller-v2.test.ts tests/controller-turn.test.ts tests/controller-compose.test.ts tests/draft.test.ts tests/placeholder.test.ts tests/meter.test.ts tests/glass.test.ts tests/noise-meter.test.ts tests/bridge.test.ts tests/voice-vad.test.js tests/asr.test.js tests/turn.test.js"
   },
   "files": [
     "lib/index.js",

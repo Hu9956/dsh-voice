@@ -9,6 +9,16 @@ export const css = `
 
 .vh-anchor { position: absolute; inset: 0 0 auto; height: 0; }
 
+.vh-ph-mic {
+  display: inline-block;
+  width: 1em; height: 1em;
+  margin: 0 2px 0 -1px;
+  vertical-align: -0.15em;
+}
+[data-vh-ph="phone"] .vh-ph-mic {
+  margin-left: -2px;
+}
+
 .vh-status {
   box-sizing: border-box;
   position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%);
